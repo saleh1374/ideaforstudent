@@ -41,6 +41,8 @@ async def seed(db: AsyncSession) -> None:
     await db.flush()
     cls = ClassRoom(school_id=school.id, grade="grade_10", track="experimental", name="۱۰۱", capacity=30)
     db.add(cls)
+    cls2 = ClassRoom(school_id=school.id, grade="grade_10", track="experimental", name="۱۰۲", capacity=30)
+    db.add(cls2)
     await db.flush()
 
     # ---------- users ----------
@@ -52,9 +54,12 @@ async def seed(db: AsyncSession) -> None:
     school_admin = mk_user("schooladmin", "مدیر مدرسه", "school_admin")
     district_admin = mk_user("districtadmin", "مدیر ناحیه", "district_admin")
     teacher = mk_user("teacher1", "آقای احمدی", "teacher")
+    teacher2 = mk_user("teacher2", "خانم کریمی", "teacher")
     student = mk_user("student1", "محمد رضایی", "student")
     student2 = mk_user("student2", "علی کاظمی", "student")
     student3 = mk_user("student3", "سارا موسوی", "student")
+    student4 = mk_user("student4", "رضا نادری", "student")
+    student5 = mk_user("student5", "مریم توکلی", "student")
     new_teacher = mk_user("newteacher", "خانم صادقی", "teacher")
     await db.flush()
 
@@ -63,6 +68,8 @@ async def seed(db: AsyncSession) -> None:
             StudentProfile(user_id=student.id, grade="grade_10", track="experimental", school_id=school.id, class_id=cls.id),
             StudentProfile(user_id=student2.id, grade="grade_10", track="experimental", school_id=school.id, class_id=cls.id),
             StudentProfile(user_id=student3.id, grade="grade_10", track="experimental", school_id=school.id, class_id=cls.id),
+            StudentProfile(user_id=student4.id, grade="grade_10", track="experimental", school_id=school.id, class_id=cls2.id),
+            StudentProfile(user_id=student5.id, grade="grade_10", track="experimental", school_id=school.id, class_id=cls2.id),
         ]
     )
 
@@ -98,7 +105,8 @@ async def seed(db: AsyncSession) -> None:
     emp_admin = Employee(user_id=school_admin.id, personnel_code="P-001")
     emp_district = Employee(user_id=district_admin.id, personnel_code="P-002")
     emp_teacher = Employee(user_id=teacher.id, personnel_code="P-003")
-    db.add_all([emp_admin, emp_district, emp_teacher])
+    emp_teacher2 = Employee(user_id=teacher2.id, personnel_code="P-004")
+    db.add_all([emp_admin, emp_district, emp_teacher, emp_teacher2])
     await db.flush()
 
     db.add_all(
@@ -106,12 +114,14 @@ async def seed(db: AsyncSession) -> None:
             Employment(employee_id=emp_admin.id, employment_type="official", organization="government", start_date=date.today()),
             Employment(employee_id=emp_district.id, employment_type="official", organization="government", start_date=date.today()),
             Employment(employee_id=emp_teacher.id, employment_type="contractual", organization="school", start_date=date.today()),
+            Employment(employee_id=emp_teacher2.id, employment_type="official", organization="government", start_date=date.today()),
         ]
     )
     db.add_all(
         [
             SchoolAssignment(employee_id=emp_admin.id, school_id=school.id, role="principal", start_date=date.today(), status="active"),
             SchoolAssignment(employee_id=emp_teacher.id, school_id=school.id, role="teacher", subject="math", start_date=date.today(), status="active"),
+            SchoolAssignment(employee_id=emp_teacher2.id, school_id=school.id, role="teacher", subject="math", start_date=date.today(), status="active"),
         ]
     )
 
@@ -222,6 +232,15 @@ async def seed(db: AsyncSession) -> None:
             status="active",
         )
     )
+    db.add(
+        ClassTeacherAssignment(
+            class_id=cls2.id,
+            teacher_user_id=teacher2.id,
+            subject="math",
+            start_date=date.today(),
+            status="active",
+        )
+    )
 
     # ---------- شواهد نمونه برای رادار کلاس و گروه‌بندی نیاز ----------
     from app.models.slm import Evidence
@@ -251,8 +270,13 @@ async def seed(db: AsyncSession) -> None:
     for d in (2, 1, 0):
         db.add(practice(student3.id, t_set.id, 1.0, d))
 
+    # کلاس ۱۰۲ (خانم کریمی): هر دو دانش‌آموز قوی و تازه → مقایسه واقعی دو کلاس
+    for uid in (student4.id, student5.id):
+        for d in (3, 2, 1):
+            db.add(practice(uid, t_set.id, 1.0, d))
+
     await db.flush()
-    for s in (student, student2, student3):
+    for s in (student, student2, student3, student4, student5):
         await update_states_from_evidence(db, s.id)
 
     await db.commit()

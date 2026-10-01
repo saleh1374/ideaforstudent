@@ -14,6 +14,7 @@ from app.models.rbac import Permission, PermissionAssignment, Role
 from app.models.slm import StudentTopicState
 from app.services.employment import decide_request, submit_teacher_request
 from app.services.rbac_service import effective_permissions, grant_permission, revoke_permission, user_scopes
+from app.services import school as school_svc
 from datetime import date
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -58,6 +59,56 @@ async def school_overview(
         "needs_intervention": status_counts["critical"] + status_counts["weak"],
         "status_counts": status_counts,
     }
+
+
+@router.get("/school/{school_id}/classes-compare/{subject}")
+async def compare_classes_endpoint(
+    school_id: int,
+    subject: str,
+    current: AuthUser = Depends(require_permission("view_school_analytics")),
+    db: AsyncSession = Depends(get_db),
+):
+    """§7 مقایسه کلاس‌های یک درس — با جمعیت کم فقط نمایشی است."""
+    return await school_svc.compare_classes(db, school_id, subject)
+
+
+@router.get("/school/{school_id}/attention-flags")
+async def attention_flags_endpoint(
+    school_id: int,
+    current: AuthUser = Depends(require_permission("view_school_analytics")),
+    db: AsyncSession = Depends(get_db),
+):
+    """§5 سامانه «نیازمند بررسی»: پرچم‌های مشخص، نه رتبه‌بندی معلم."""
+    return await school_svc.attention_flags(db, school_id)
+
+
+@router.get("/school/{school_id}/teachers")
+async def teacher_profiles_endpoint(
+    school_id: int,
+    current: AuthUser = Depends(require_permission("view_school_analytics")),
+    db: AsyncSession = Depends(get_db),
+):
+    """§4 نمایه سبک معلمان: شاخص عینی آموزشی + رفتاری، بدون امتیاز کل."""
+    return await school_svc.teacher_lite_profiles(db, school_id)
+
+
+@router.get("/classes/{class_id}/diagnosis")
+async def class_diagnosis_endpoint(
+    class_id: int,
+    current: AuthUser = Depends(require_permission("view_school_analytics")),
+    db: AsyncSession = Depends(get_db),
+):
+    """§6 تشخیص چندعاملی ضعف کلاس — قابل اقدام، نه قضاوت."""
+    return await school_svc.multi_factor_diagnosis(db, class_id)
+
+
+@router.get("/classes/{class_id}/summary")
+async def class_summary_endpoint(
+    class_id: int,
+    current: AuthUser = Depends(require_permission("view_school_analytics")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await school_svc.class_subject_summary(db, class_id)
 
 
 @router.get("/employment-requests")

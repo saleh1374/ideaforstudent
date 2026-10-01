@@ -2,7 +2,7 @@
 > daneshyar-web@0.1.0 dev
 > next dev -p 3000
 
-(node:7896) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/CynetAdmin/Desktop/ideaforstudent/frontend/next.config.js is not specified and it doesn't parse as CommonJS.
+(node:6668) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/CynetAdmin/Desktop/ideaforstudent/frontend/next.config.js is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to C:\Users\CynetAdmin\Desktop\ideaforstudent\frontend\package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
@@ -10,30 +10,35 @@ To eliminate this warning, add "type": "module" to C:\Users\CynetAdmin\Desktop\i
   - Local:        http://localhost:3000
 
  ✓ Starting...
-(node:604) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/CynetAdmin/Desktop/ideaforstudent/frontend/next.config.js is not specified and it doesn't parse as CommonJS.
+(node:3656) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/CynetAdmin/Desktop/ideaforstudent/frontend/next.config.js is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to C:\Users\CynetAdmin\Desktop\ideaforstudent\frontend\package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
- ✓ Ready in 1170ms
- ○ Compiling /admin ...
- ✓ Compiled /admin in 2.6s (472 modules)
- ⚠ Fast Refresh had to perform a full reload due to a runtime error.
- GET /login 200 in 2693ms
+ ✓ Ready in 1145ms
+ ○ Compiling /login ...
+ ✓ Compiled /login in 2.2s (464 modules)
  ⚠ Fast Refresh had to perform a full reload due to a runtime error.
  ⚠ Fast Refresh had to perform a full reload due to a runtime error.
- GET /_next/static/webpack/05bb17a4b15397c9.webpack.hot-update.json 404 in 2742ms
- GET /_next/static/webpack/05bb17a4b15397c9.webpack.hot-update.json 404 in 2764ms
- GET /login? 200 in 2756ms
- GET /admin 200 in 2769ms
- GET /login 200 in 145ms
-(node:604) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
- GET /login 200 in 48ms
- GET /login 200 in 26ms
- ○ Compiling /teacher ...
- ✓ Compiled /teacher in 514ms (475 modules)
- GET /admin 200 in 50ms
- GET /login 200 in 15ms
- GET /login 200 in 16ms
+ GET /_next/static/webpack/2241b0d07bbdc74d.webpack.hot-update.json 404 in 2351ms
+ ⚠ Fast Refresh had to perform a full reload due to a runtime error.
+ GET /_next/static/webpack/2241b0d07bbdc74d.webpack.hot-update.json 404 in 2357ms
+ GET /login 200 in 2377ms
+ GET /login 200 in 2379ms
+ GET /login 200 in 80ms
+ GET /login 200 in 62ms
+ GET /login 200 in 34ms
+(node:3656) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
+ ✓ Compiled /admin in 481ms (472 modules)
+ GET /login 200 in 96ms
+ GET /admin 200 in 97ms
+ GET /admin 200 in 18ms
+ GET /admin 200 in 19ms
  ○ Compiling /student ...
- ✓ Compiled /student in 510ms (507 modules)
- GET /login 200 in 52ms
+ ✓ Compiled /student in 892ms (501 modules)
+ GET /student 200 in 1097ms
+ GET /login 200 in 26ms
+ ✓ Compiled / in 139ms (507 modules)
+ GET / 200 in 201ms
+ GET /login 200 in 20ms
+ GET /login 200 in 20ms
+ ✓ Compiled /teacher in 415ms (489 modules)

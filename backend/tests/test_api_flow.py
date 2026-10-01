@@ -81,7 +81,7 @@ async def test_full_flow(client, seeded):
     r = await client.get("/admin/school/1/overview", headers=auth(atok))
     assert r.status_code == 200, r.text
     ov = r.json()
-    assert ov["students_count"] == 3
+    assert ov["students_count"] == 5  # 3 در کلاس ۱۰۱ + 2 در کلاس ۱۰۲
     # avg may be None if fewer than min-evidence (3) topics have data — only
     # student1 answered; mastery counts only states with >=3 evidences
     assert ov["status_counts"] is not None
