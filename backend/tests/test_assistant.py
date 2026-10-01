@@ -132,3 +132,39 @@ async def test_conversations_list(client, seeded):
     r = await client.get("/assistant/conversations", headers=auth(stok))
     assert r.status_code == 200
     assert len(r.json()["conversations"]) >= 1
+
+
+@pytest.mark.anyio
+async def test_cache_never_leaks_personal_data(client, seeded):
+    """حریم خصوصی: کش فقط بخش عمومی را نگه می‌دارد؛ وضعیت دانش‌آموز اول
+    در پاسخ دانش‌آموز دوم ظاهر نمی‌شود (حتی با پرسش یکسان/مشابه)."""
+    q = "تعداد زیرمجموعه‌ها چند است؟"
+
+    # student1 پرسش را می‌پرسد (شواهد دارد → پاسخ شخصی‌شده شامل وضعیت اوست)
+    st1 = await login(client, "student1")
+    r1 = await client.post("/assistant/chat", headers=auth(st1), json={"message": q})
+    assert r1.json()["cached"] is False
+    reply1 = r1.json()["reply"]
+    # پاسخ اول شامل وضعیت شخصی student1 است (یا حداقل بخش شخصی دارد)
+
+    # student2 با همان پرسش → کش می‌خورد ولی نباید داده‌ای از student1 ببیند
+    st2 = await login(client, "student2")
+    r2 = await client.post("/assistant/chat", headers=auth(st2), json={"message": q})
+    out2 = r2.json()
+    assert out2["cached"] is True
+    reply2 = out2["reply"]
+
+    # نام دانش‌آموز اول و مقادیر تسلط/ماندگاری اختصاصی او نباید در پاسخ دوم باشد
+    assert "محمد رضایی" not in reply2
+    # رکورد کش فقط بخش عمومی را نگه داشته (قالب intro || tail)
+    from app.models.assistant import SemanticCache
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(select(SemanticCache))).scalars().all()
+        for row in rows:
+            assert " || " in row.response, "کش نباید پاسخ کامل/شخصی را نگه دارد"
+
+    # هر دو کاربر پاسخ شخصی خودشان را می‌گیرند: وضعیت student1 در پاسخ او هست
+    assert "وضعیت شما" in reply1
+    assert "وضعیت شما" in reply2

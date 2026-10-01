@@ -73,6 +73,29 @@ async def test_province_and_national_stats(client, seeded):
 
 
 @pytest.mark.anyio
+async def test_concurrent_recompute_no_unique_conflict(client, seeded):
+    """دو بازمحاسبه موازی (مثل Promise.all صفحه وزارت) نباید UNIQUE conflict بدهند."""
+    ptok = await login(client, "provinceadmin")
+    h = auth(ptok)
+    import asyncio
+
+    r1, r2 = await asyncio.gather(
+        client.get("/geo/national/topics", headers=h),
+        client.get("/geo/national/overview", headers=h),
+    )
+    assert r1.status_code == 200, r1.text
+    assert r2.status_code == 200, r2.text
+
+    # دوباره همزمان → ردیف‌ها از قبل هستند؛ باز هم باید سبز باشد
+    r3, r4 = await asyncio.gather(
+        client.post("/geo/national/refresh", headers=h),
+        client.post("/geo/national/refresh", headers=h),
+    )
+    assert r3.status_code == 200, r3.text
+    assert r4.status_code == 200, r4.text
+
+
+@pytest.mark.anyio
 async def test_national_stats_permission(client, seeded):
     # معلم/دانش‌آموز دسترسی ندارند
     for user in ("student1", "teacher1"):

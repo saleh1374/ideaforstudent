@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -50,17 +50,13 @@ async def recompute_topic_stats(db: AsyncSession, province_id: int | None = None
     topics = {t.id: t for t in (await db.execute(select(Topic))).scalars()}
     chapters = {c.id: c for c in (await db.execute(select(Chapter))).scalars()}
 
-    # ردیف‌های قبلی همین دامنه حذف و بازسازی می‌شوند
-    old = (
-        await db.execute(
-            select(NationalTopicStat).where(
-                NationalTopicStat.scope == scope, NationalTopicStat.province_id == pid
-            )
-        )
-    ).scalars().all()
-    for row in old:
-        await db.delete(row)
-    await db.flush()
+    # upsert اتمیک: دو درخواست موازی (صفحه وزارت با Promise.all) نباید با
+    # UNIQUE constraint بخورند — هر ردیف یا درج می‌شود یا به‌روز.
+    dialect = db.get_bind().dialect.name if db.get_bind() is not None else "sqlite"
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as _stmt_insert
+    else:
+        from sqlalchemy.dialects.sqlite import insert as _stmt_insert
 
     written = 0
     suppressed = 0
@@ -89,21 +85,36 @@ async def recompute_topic_stats(db: AsyncSession, province_id: int | None = None
                 if with_data
                 else None
             )
-        db.add(
-            NationalTopicStat(
-                scope=scope,
-                province_id=pid,
-                topic_id=topic_id,
-                subject=subject,
-                students_count=len(students),
-                avg_mastery=avg_m,
-                avg_retention=avg_r,
-                weak_ratio=weak,
-                is_suppressed=1 if is_suppressed else 0,
-                updated_at=datetime.now(timezone.utc),
+        values = {
+            "scope": scope,
+            "province_id": pid,
+            "topic_id": topic_id,
+            "subject": subject,
+            "students_count": len(students),
+            "avg_mastery": avg_m,
+            "avg_retention": avg_r,
+            "weak_ratio": weak,
+            "is_suppressed": 1 if is_suppressed else 0,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        stmt = _stmt_insert(NationalTopicStat).values(**values)
+        update_cols = {k: getattr(stmt.excluded, k) for k in values if k != "topic_id"}
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["scope", "province_id", "topic_id"],
+            set_=update_cols,
+        )
+        await db.execute(stmt)
+        written += 1
+
+    # پاک‌سازی ردیف‌های کهنه (مبحث حذف‌شده از کاتالوگ) — idempotent
+    if by_topic:
+        await db.execute(
+            delete(NationalTopicStat).where(
+                NationalTopicStat.scope == scope,
+                NationalTopicStat.province_id == pid,
+                NationalTopicStat.topic_id.notin_(list(by_topic.keys())),
             )
         )
-        written += 1
     await db.flush()
     return {"scope": scope, "written": written, "suppressed": suppressed, "min_group": s.min_group_size}
 

@@ -125,13 +125,14 @@ async def retrieve(db: AsyncSession, student_user_id: int, query: str) -> tuple[
     return sources, top
 
 
-async def compose_answer(
-    db: AsyncSession, student_user_id: int, query: str, sources: list[dict], matched_topics: list[Topic]
+async def personal_block(
+    db: AsyncSession, student_user_id: int, matched_topics: list[Topic]
 ) -> str:
-    """پاسخ شخصی‌سازی‌شده از منابع بازیابی‌شده + خطاهای باز دانش‌آموز."""
+    """بخش شخصی پاسخ — همیشه برای همین کاربر ساخته می‌شود و هرگز کش نمی‌شود
+    (حریم خصوصی: وضعیت/خطاهای دانش‌آموز نباید به کاربر دیگری برسد)."""
     lines: list[str] = []
     if matched_topics:
-        lines.append("بر اساس کاتالوگ درس، این مباحث پیدا شدند:")
+        lines.append("وضعیت شما:")
         states = {
             st.topic_id: st
             for st in (
@@ -142,13 +143,11 @@ async def compose_answer(
             st = states.get(t.id)
             if st is not None:
                 lines.append(
-                    f"• «{t.title_fa}» — وضعیت شما: {status_of(st.effective_mastery, st.evidence_count)} "
+                    f"• «{t.title_fa}» — {status_of(st.effective_mastery, st.evidence_count)} "
                     f"(تسلط {round(st.effective_mastery)}٪، ماندگاری {round(st.retention * 100)}٪)"
                 )
             else:
                 lines.append(f"• «{t.title_fa}» — هنوز شواهدی از شما ثبت نشده است.")
-    else:
-        lines.append("مبحث منطبقی در کاتالوگ پیدا نشد؛ سؤال را با عنوان فصل یا مبحث بنویس (مثلاً «تعداد زیرمجموعه‌ها»).")
 
     # خطاهای باز → اقدام مشخص
     open_errors = (
@@ -165,14 +164,38 @@ async def compose_answer(
             f"\nخطای باز شما: «{top.item_snapshot.get('body', '')[:80]}» → {CAUSE_HINT_FA.get(top.cause, '')}"
         )
 
-    ladder = review_ladder()
-    lines.append(f"\nبرنامه مرور پیشنهادی (نردبان {', '.join(map(str, ladder))} روز): مرور بعدی را طبق آزمون بعدی زمان‌بندی کن.")
-    lines.append("⚠️ پاسخ از روی منابع کاتالوگ و وضعیت خودتان ساخته شده؛ جایگزین کتاب درسی نیست.")
     return "\n".join(lines)
 
 
+def generic_intro(matched_topics: list[Topic]) -> str:
+    """بخش عمومی پاسخ (قابل کش): فقط عنوان مباحث — بدون هیچ داده شخصی."""
+    if matched_topics:
+        titles = "، ".join(f"«{t.title_fa}»" for t in matched_topics[:3])
+        return f"بر اساس کاتالوگ درس، این مباحث پیدا شدند: {titles}"
+    return "مبحث منطبقی در کاتالوگ پیدا نشد؛ سؤال را با عنوان فصل یا مبحث بنویس (مثلاً «تعداد زیرمجموعه‌ها»)."
+
+
+def generic_tail() -> str:
+    """بخش عمومی پاسخ (قابل کش): نردبان مرور + هشدار منبع."""
+    ladder = review_ladder()
+    return (
+        f"\nبرنامه مرور پیشنهادی (نردبان {', '.join(map(str, ladder))} روز): "
+        "مرور بعدی را طبق آزمون بعدی زمان‌بندی کن.\n"
+        "⚠️ پاسخ از روی منابع کاتالوگ و وضعیت خودتان ساخته شده؛ جایگزین کتاب درسی نیست."
+    )
+
+
+def _cache_parts(response: str) -> tuple[str, str] | None:
+    """نرمال‌شده قدیمی (حاوی داده شخصی) نباید استفاده شود؛ فقط قالب جدید {intro} || {tail}."""
+    if " || " not in response:
+        return None
+    intro, tail = response.split(" || ", 1)
+    return intro, tail
+
+
 async def chat(db: AsyncSession, student_user_id: int, message: str, conversation_id: int | None) -> dict:
-    """حلقه کامل چت: کش → بازیابی → پاسخ → ثبت پیام."""
+    """حلقه کامل چت: بازیابی همیشه تازه → کش فقط بخش عمومی → الحاق بخش شخصی
+    همین کاربر → ثبت پیام (بخش شخصی هرگز وارد کش نمی‌شود)."""
     norm = normalize_query(message)
     tier = pick_tier(message)
 
@@ -184,18 +207,33 @@ async def chat(db: AsyncSession, student_user_id: int, message: str, conversatio
 
     db.add(AiMessage(conversation_id=conv.id, role="user", content=message))
 
+    # بازیابی منابع در هر دو مسیر (کش/بدون کش) تا منابع همیشه برگردند
+    sources, matched = await retrieve(db, student_user_id, message)
+
     cached = await semantic_lookup(db, norm)
-    if cached is not None:
-        reply, cached_flag, sources = cached.response, True, []
-        tier_used = "small"
+    parts = _cache_parts(cached.response) if cached is not None else None
+    if parts is not None:
+        intro, tail = parts
+        cached_flag, tier_used = True, "small"
     else:
-        sources, matched = await retrieve(db, student_user_id, message)
-        reply = await compose_answer(db, student_user_id, message, sources, matched)
-        cached_flag = False
-        tier_used = tier
-        db.add(
-            SemanticCache(query_norm=norm, query_original=message, response=reply, hit_count=0)
-        )
+        intro = generic_intro(matched)
+        tail = generic_tail()
+        cached_flag, tier_used = False, tier
+        if cached is not None:
+            # رکورد قدیمی با پاسخ کامل (حاوی داده شخصی) → بازنویسی به قالب عمومی
+            cached.response = f"{intro} || {tail}"
+        else:
+            db.add(
+                SemanticCache(
+                    query_norm=norm,
+                    query_original=message,
+                    response=f"{intro} || {tail}",
+                    hit_count=0,
+                )
+            )
+
+    personal = await personal_block(db, student_user_id, matched)
+    reply = "\n\n".join(p for p in (intro, personal, tail) if p)
 
     db.add(
         AiMessage(
