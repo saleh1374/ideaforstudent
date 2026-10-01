@@ -42,7 +42,6 @@ export default function GeoPage() {
       return;
     }
     setOv(null);
-    setRefreshMsg("");
     try {
       const me = await api<{ role: string }>("/auth/me");
       setRole(me.role);
@@ -59,6 +58,7 @@ export default function GeoPage() {
   }, []);
 
   useEffect(() => {
+    setRefreshMsg("");
     load(tab);
   }, [tab, load]);
 
@@ -66,8 +66,8 @@ export default function GeoPage() {
     setRefreshMsg("");
     try {
       const res = await api<{ national: { written: number; suppressed: number } }>("/geo/national/refresh", { method: "POST" });
-      setRefreshMsg(`✓ بازمحاسبه شد: ${fa(res.national.written)} مبحث (${fa(res.national.suppressed)} سرکوب‌شده)`);
       await load(tab);
+      setRefreshMsg(`✓ بازمحاسبه شد: ${fa(res.national.written)} مبحث (${fa(res.national.suppressed)} سرکوب‌شده)`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "خطا");
     }
