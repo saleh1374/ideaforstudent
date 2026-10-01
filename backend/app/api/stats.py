@@ -15,7 +15,7 @@ router = APIRouter(prefix="/geo", tags=["province", "ministry"])
 @router.get("/province/{province_id}/overview")
 async def province_overview(
     province_id: int,
-    current: AuthUser = Depends(require_permission("view_province_analytics")),
+    current: AuthUser = Depends(require_permission("view_province_analytics", scope_type="province", scope_param="province_id")),
     db: AsyncSession = Depends(get_db),
 ):
     if await db.get(Province, province_id) is None:
@@ -28,7 +28,7 @@ async def province_overview(
 @router.get("/province/{province_id}/topics")
 async def province_topics(
     province_id: int,
-    current: AuthUser = Depends(require_permission("view_province_analytics")),
+    current: AuthUser = Depends(require_permission("view_province_analytics", scope_type="province", scope_param="province_id")),
     db: AsyncSession = Depends(get_db),
 ):
     if await db.get(Province, province_id) is None:
@@ -40,7 +40,7 @@ async def province_topics(
 
 @router.get("/national/overview")
 async def national_overview(
-    current: AuthUser = Depends(require_permission("view_national_analytics")),
+    current: AuthUser = Depends(require_permission("view_national_analytics", scope_type="national", scope_id=0)),
     db: AsyncSession = Depends(get_db),
 ):
     result = await stats_service.overview(db, None)
@@ -50,7 +50,7 @@ async def national_overview(
 
 @router.get("/national/topics")
 async def national_topics(
-    current: AuthUser = Depends(require_permission("view_national_analytics")),
+    current: AuthUser = Depends(require_permission("view_national_analytics", scope_type="national", scope_id=0)),
     db: AsyncSession = Depends(get_db),
 ):
     result = await stats_service.topic_stats(db, None)
@@ -60,7 +60,7 @@ async def national_topics(
 
 @router.post("/national/refresh")
 async def national_refresh(
-    current: AuthUser = Depends(require_permission("view_national_analytics")),
+    current: AuthUser = Depends(require_permission("view_national_analytics", scope_type="national", scope_id=0)),
     db: AsyncSession = Depends(get_db),
 ):
     """بازمحاسبه تجمیع‌های ملی + همه استان‌ها (قابل اجرا توسط وزارت/استان)."""

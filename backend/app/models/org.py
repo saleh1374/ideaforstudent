@@ -115,7 +115,9 @@ class Employment(Base):
     employment_type: Mapped[str] = mapped_column(String(20))
     # official | contractual | part_time | temporary | other
     organization: Mapped[str] = mapped_column(String(20))
-    # government | school | private
+    # government | school | private | district (کارکنان اداری ناحیه)
+    district_id: Mapped[int | None] = mapped_column(ForeignKey("districts.id"))
+    # ناحیه برای کارکنان اداری ناحیه (پنل مدیر ناحیه §12 — Employment organization="district")
     start_date: Mapped[date] = mapped_column(Date)
     end_date: Mapped[date | None] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String(20), default="active")

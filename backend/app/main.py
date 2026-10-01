@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import admin, assistant, auth, boards, parent, stats, student, teacher, tutor
+from app.api import admin, assistant, auth, boards, district, parent, stats, student, teacher, tutor
 from app.core.config import get_settings
 from app.core.db import init_models
 
@@ -33,6 +33,7 @@ app.include_router(parent.router)
 app.include_router(boards.router)
 app.include_router(assistant.router)
 app.include_router(stats.router)
+app.include_router(district.router)
 app.include_router(tutor.router)
 
 

@@ -1,8 +1,36 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, getToken } from "@/lib/api";
-import { CAUSE_SHORT, fa } from "@/lib/labels";
+import { CAUSE_SHORT, fa, subjectFa } from "@/lib/labels";
+import { AppShell } from "@/components/ui/shell";
+import { PageHeader } from "@/components/ui/page-header";
+import { Card, CardHeader, Section } from "@/components/ui/card";
+import { StatCard } from "@/components/ui/stat";
+import { Alert } from "@/components/ui/alert";
+import { Badge, statusTone } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty";
+import { Field, Input, Select } from "@/components/ui/forms";
+import { Modal } from "@/components/ui/modal";
+import { Tabs } from "@/components/ui/tabs";
+import { DataTable, type Column } from "@/components/ui/table";
+import { BarChart, DonutChart } from "@/components/ui/charts";
+import { SkeletonStats } from "@/components/ui/skeleton";
+import { toast } from "@/components/ui/toast";
+import {
+  IconAlert,
+  IconChart,
+  IconCheckCircle,
+  IconLayers,
+  IconPlus,
+  IconRefresh,
+  IconSchool,
+  IconShield,
+  IconTarget,
+  IconUsers,
+  IconX,
+} from "@/components/ui/icons";
 
 type Overview = {
   school: { id: number; name: string; type: string; ownership: string };
@@ -85,11 +113,18 @@ const REQ_STATUS_FA: Record<string, string> = {
   auto_approved: "تأیید خودکار (سیاست)",
 };
 
-const FLAG_ICON: Record<string, string> = {
-  low_mastery_majority: "🔴",
-  high_repeats: "🟠",
-  ineffective_intervention: "🟣",
-  low_platform_usage: "⚪",
+const EMPLOYMENT_FA: Record<string, string> = {
+  official: "رسمی",
+  contractual: "قراردادی",
+  part_time: "پاره‌وقت",
+  temporary: "موقت",
+};
+
+const FLAG_STYLE: Record<string, string> = {
+  low_mastery_majority: "bg-danger-50 text-danger-600",
+  high_repeats: "bg-warning-50 text-warning-600",
+  ineffective_intervention: "bg-accent-50 text-accent-600",
+  low_platform_usage: "bg-slate-100 text-ink-muted",
 };
 
 type Tab = "compare" | "flags" | "teachers";
@@ -102,9 +137,11 @@ export default function AdminPage() {
   const [profiles, setProfiles] = useState<TeacherProfile[]>([]);
   const [diagnosis, setDiagnosis] = useState<Diagnosis | null>(null);
   const [requests, setRequests] = useState<Request[]>([]);
-  const [msg, setMsg] = useState("");
+  const [error, setError] = useState("");
   const [role, setRole] = useState("");
+  const [loading, setLoading] = useState(true);
   const [form, setForm] = useState({ employee_user_id: 7, full_name: "", employment_type: "contractual", subject: "math" });
+  const [submitting, setSubmitting] = useState(false);
 
   const loadAll = useCallback(async () => {
     if (!getToken()) {
@@ -120,7 +157,9 @@ export default function AdminPage() {
       setProfiles((await api<{ profiles: TeacherProfile[] }>("/admin/school/1/teachers")).profiles);
       setRequests((await api<{ requests: Request[] }>("/admin/employment-requests")).requests);
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : "خطا");
+      setError(e instanceof Error ? e.message : "خطا");
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -133,297 +172,429 @@ export default function AdminPage() {
     try {
       setDiagnosis(await api<Diagnosis>(`/admin/classes/${classId}/diagnosis`));
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : "خطا");
+      toast(e instanceof Error ? e.message : "خطا در تشخیص", "error");
     }
   }
 
   async function addTeacher(e: React.FormEvent) {
     e.preventDefault();
-    setMsg("");
+    setSubmitting(true);
     try {
       const res = await api<{ status: string }>("/admin/employment-requests", { method: "POST", json: form });
-      setMsg(
+      toast(
         res.status === "auto_approved"
-          ? "✓ طبق سیاست استخدام، تأیید ناحیه لازم نبود — معلم فعال شد."
-          : "درخواست ثبت شد و برای تأیید به ناحیه ارسال شد."
+          ? "طبق سیاست استخدام، تأیید ناحیه لازم نبود — معلم فعال شد."
+          : "درخواست ثبت شد و برای تأیید به ناحیه ارسال شد.",
+        "success"
       );
+      setForm({ ...form, full_name: "" });
       await loadAll();
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : "خطا");
+      toast(e instanceof Error ? e.message : "خطا در ثبت درخواست", "error");
+    } finally {
+      setSubmitting(false);
     }
   }
 
   async function decide(id: number, approve: boolean) {
-    setMsg("");
     try {
       await api(`/admin/employment-requests/${id}/decide`, { method: "POST", json: { approve } });
+      toast(approve ? "درخواست تأیید شد." : "درخواست رد شد.", approve ? "success" : "info");
       await loadAll();
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : "خطا");
+      toast(e instanceof Error ? e.message : "خطا", "error");
     }
   }
 
-  if (msg && !ov) return <main className="p-6 text-red-600">{msg}</main>;
-  if (!ov) return <main className="p-6 text-slate-400">در حال بارگذاری…</main>;
+  const statusData = useMemo(() => {
+    if (!ov) return [];
+    const colors: Record<string, string> = {
+      mastered: "#10b981",
+      consolidating: "#0ea5e9",
+      weak: "#f59e0b",
+      critical: "#f43f5e",
+      unknown: "#cbd5e1",
+    };
+    const labels: Record<string, string> = {
+      mastered: "مسلط",
+      consolidating: "در حال تثبیت",
+      weak: "ضعیف",
+      critical: "بحرانی",
+      unknown: "نامشخص",
+    };
+    return Object.entries(ov.status_counts).map(([k, v]) => ({ label: labels[k] ?? k, value: v, color: colors[k] }));
+  }, [ov]);
+
+  const classChartData = useMemo(
+    () =>
+      (cmp?.rows ?? [])
+        .filter((r) => r.avg_mastery !== null)
+        .map((r) => ({
+          label: r.class_name,
+          value: Math.round(r.avg_mastery as number),
+          color: r.drop_flag ? "#f43f5e" : "#6366f1",
+        })),
+    [cmp]
+  );
+
+  const compareColumns: Column<CompareRow>[] = [
+    {
+      key: "class",
+      header: "کلاس",
+      render: (row) => (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-semibold text-ink">{row.class_name}</span>
+          {row.drop_flag && (
+            <Badge tone="danger" dot>
+              کلاس دارای افت
+            </Badge>
+          )}
+        </div>
+      ),
+    },
+    { key: "teacher", header: "معلم", align: "center", render: (row) => row.teacher?.full_name ?? "—" },
+    {
+      key: "mastery",
+      header: "تسط",
+      align: "center",
+      render: (row) => <span className="num font-bold text-ink">{row.avg_mastery !== null ? `${fa(row.avg_mastery)}٪` : "—"}</span>,
+    },
+    {
+      key: "retention",
+      header: "ماندگاری",
+      align: "center",
+      render: (row) => <span className="num">{row.avg_retention !== null ? `${fa(row.avg_retention * 100)}٪` : "—"}</span>,
+    },
+    {
+      key: "gap",
+      header: "اختلاف با میانگین",
+      align: "center",
+      render: (row) => (
+        <span className={`num font-semibold ${row.drop_flag ? "text-danger-600" : "text-ink-muted"}`}>
+          {row.gap_vs_school_avg !== null ? `${row.gap_vs_school_avg > 0 ? "+" : ""}${fa(row.gap_vs_school_avg)} واحد` : "—"}
+        </span>
+      ),
+    },
+    { key: "errors", header: "خطاها", align: "center", render: (row) => <span className="num">{fa(row.total_errors)}</span> },
+    {
+      key: "act",
+      header: "",
+      align: "end",
+      render: (row) => (
+        <Button size="sm" variant="soft" onClick={() => openDiagnosis(row.class_id)}>
+          تشخیص ضعف
+        </Button>
+      ),
+    },
+  ];
+
+  const profileColumns: Column<TeacherProfile>[] = [
+    { key: "name", header: "معلم", render: (row) => <span className="font-semibold text-ink">{row.teacher_name ?? "—"}</span> },
+    { key: "class", header: "درس / کلاس", align: "center", render: (row) => `${subjectFa(row.subject)} · کلاس ${row.class_name}` },
+    { key: "students", header: "دانش‌آموز", align: "center", render: (row) => <span className="num">{fa(row.students_count)}</span> },
+    {
+      key: "mastery",
+      header: "تسط کلاس",
+      align: "center",
+      render: (row) => <span className="num font-bold text-ink">{row.class_mastery !== null ? `${fa(row.class_mastery)}٪` : "—"}</span>,
+    },
+    {
+      key: "retention",
+      header: "ماندگاری",
+      align: "center",
+      render: (row) => <span className="num">{row.class_retention !== null ? `${fa(row.class_retention * 100)}٪` : "—"}</span>,
+    },
+    { key: "exams", header: "آزمون ثبت‌شده", align: "center", render: (row) => <span className="num">{fa(row.platform.exam_sessions_recorded)}</span> },
+  ];
 
   return (
-    <main className="max-w-5xl mx-auto p-6 space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-bold">{ov.school.name}</h1>
-          <p className="text-xs text-slate-400">
-            {role === "district_admin" ? "دید ناحیه" : "دید مدرسه"} — {ov.school.ownership === "public" ? "دولتی" : ov.school.ownership}
-          </p>
-        </div>
-        <button
-          className="btn-ghost text-xs"
-          onClick={() => {
-            localStorage.removeItem("daneshyar_token");
-            window.location.href = "/login";
-          }}
-        >
-          خروج
-        </button>
-      </header>
+    <AppShell>
+      <div className="space-y-6">
+        <PageHeader
+          title={loading ? "مدیریت مدرسه" : ov?.school.name ?? "مدیریت مدرسه"}
+          description={
+            ov
+              ? `داشبورد کلان مدرسه — ${ov.school.ownership === "public" ? "دولتی" : ov.school.ownership} · ${role === "district_admin" ? "دید ناحیه" : "دید مدرسه"}`
+              : "داشبورد کلان مدرسه، مقایسه کلاس‌ها و کارتابل استخدام"
+          }
+          crumbs={[{ label: "دانشیار" }, { label: "مدیریت" }, { label: "مدرسه" }]}
+          badge={role ? <Badge tone="primary" dot>{role === "district_admin" ? "دید ناحیه" : "دید مدرسه"}</Badge> : undefined}
+          actions={
+            <Button variant="ghost" size="sm" icon={<IconRefresh size={15} />} onClick={() => { setLoading(true); loadAll(); }}>
+              به‌روزرسانی
+            </Button>
+          }
+        />
 
-      {/* داشبورد کلان (§2) */}
-      <section className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        <div className="card text-center">
-          <p className="text-xs text-slate-500">دانش‌آموزان</p>
-          <p className="text-2xl font-bold mt-1">{fa(ov.students_count)}</p>
-        </div>
-        <div className="card text-center">
-          <p className="text-xs text-slate-500">میانگین تسلط مؤثر</p>
-          <p className="text-2xl font-bold mt-1 text-emerald-600">
-            {ov.avg_effective_mastery !== null ? `${fa(ov.avg_effective_mastery, 1)}٪` : "—"}
-          </p>
-        </div>
-        <div className="card text-center">
-          <p className="text-xs text-slate-500">نیازمند مداخله</p>
-          <p className="text-2xl font-bold mt-1 text-red-600">{fa(ov.needs_intervention)}</p>
-        </div>
-        <div className="card text-center">
-          <p className="text-xs text-slate-500">مباحث بحرانی/ضعیف</p>
-          <p className="text-2xl font-bold mt-1">{fa((ov.status_counts.critical ?? 0) + (ov.status_counts.weak ?? 0))}</p>
-        </div>
-      </section>
+        {error && !ov && <Alert variant="danger" title="خطا در دریافت اطلاعات">{error}</Alert>}
 
-      {msg && <div className="card border-primary-200 bg-primary-50 text-sm text-primary-700">{msg}</div>}
-
-      {/* تب‌های تحلیلی */}
-      <nav className="flex gap-2">
-        {(
-          [
-            ["compare", "مقایسه کلاس‌ها"],
-            ["flags", `نیازمند بررسی (${flags.length})`],
-            ["teachers", "نمایه معلمان"],
-          ] as [Tab, string][]
-        ).map(([k, label]) => (
-          <button
-            key={k}
-            className={`btn text-sm ${tab === k ? "bg-primary-600 text-white" : "border border-slate-300 hover:bg-slate-50"}`}
-            onClick={() => setTab(k)}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
-
-      {/* §7 مقایسه کلاس‌ها */}
-      {tab === "compare" && cmp && (
-        <section className="space-y-3">
-          {!cmp.comparison_valid && (
-            <div className="card border-amber-200 bg-amber-50 text-xs text-amber-800">{cmp.min_group_note}</div>
-          )}
-          <div className="card overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-slate-400 text-xs border-b border-slate-100">
-                  <th className="text-right py-2">کلاس</th>
-                  <th className="py-2">معلم</th>
-                  <th className="py-2">تسلط</th>
-                  <th className="py-2">ماندگاری</th>
-                  <th className="py-2">اختلاف با میانگین</th>
-                  <th className="py-2">خطاها</th>
-                  <th className="py-2"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {cmp.rows.map((row) => (
-                  <tr key={row.class_id} className="border-b border-slate-50">
-                    <td className="py-2 text-right font-medium">
-                      {row.class_name}
-                      {row.drop_flag && <span className="badge bg-red-100 text-red-700 mr-2">کلاس دارای افت</span>}
-                    </td>
-                    <td className="py-2 text-center">{row.teacher?.full_name ?? "—"}</td>
-                    <td className="py-2 text-center font-semibold">{row.avg_mastery !== null ? `${fa(row.avg_mastery)}٪` : "—"}</td>
-                    <td className="py-2 text-center">{row.avg_retention !== null ? `${fa(row.avg_retention * 100)}٪` : "—"}</td>
-                    <td className={`py-2 text-center ${row.drop_flag ? "text-red-600 font-semibold" : ""}`}>
-                      {row.gap_vs_school_avg !== null ? `${row.gap_vs_school_avg > 0 ? "+" : ""}${fa(row.gap_vs_school_avg)} واحد` : "—"}
-                    </td>
-                    <td className="py-2 text-center">{fa(row.total_errors)}</td>
-                    <td className="py-2 text-center">
-                      <button className="btn-ghost text-xs" onClick={() => openDiagnosis(row.class_id)}>
-                        تشخیص ضعف
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        {loading && !ov && (
+          <div className="space-y-5">
+            <SkeletonStats count={4} />
+            <SkeletonStats count={2} />
           </div>
-          <p className="text-xs text-slate-400">
-            پرچم «کلاس دارای افت» یعنی اختلاف ≥ ۱۰ واحد با میانگین هم‌درس‌ها — فقط پرچم است، نه حکم درباره معلم.
-          </p>
-        </section>
-      )}
+        )}
 
-      {/* §5 سامانه نیازمند بررسی */}
-      {tab === "flags" && (
-        <section className="space-y-3">
-          <div className="card border-slate-200 bg-slate-50 text-xs text-slate-600">
-            این موارد هشدار هستند، نه ارزیابی قطعی از معلم. (سند مدیر مدرسه §5)
-          </div>
-          {flags.length === 0 && <div className="card text-sm text-slate-400">هیچ مورد نیازمند بررسی فعلاً وجود ندارد.</div>}
-          {flags.map((f, i) => (
-            <div key={i} className="card space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="font-medium">
-                  {FLAG_ICON[f.flag_type]} {f.title_fa}
-                </span>
-                <span className="text-xs text-slate-400">
-                  کلاس {f.class_name} · {f.subject} · {f.teacher_name ?? "—"}
-                </span>
-              </div>
-              <p className="text-sm text-slate-600">{f.evidence_fa}</p>
-              <p className="text-xs text-primary-700">اقدام: {f.action_fa}</p>
-              <button className="btn-ghost text-xs mt-1" onClick={() => openDiagnosis(f.class_id)}>
-                تشخیص چندعاملی این کلاس
-              </button>
-            </div>
-          ))}
-        </section>
-      )}
+        {ov && (
+          <>
+            <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+              <StatCard label="دانش‌آموزان" value={fa(ov.students_count)} tone="primary" icon={<IconUsers size={20} />} hint={ov.school.name} />
+              <StatCard
+                label="میانگین تسط مؤثر"
+                value={ov.avg_effective_mastery !== null ? `${fa(ov.avg_effective_mastery, 1)}٪` : "—"}
+                tone="success"
+                icon={<IconTarget size={20} />}
+                hint="همه مباحث"
+              />
+              <StatCard label="نیازمند مداخله" value={fa(ov.needs_intervention)} tone="danger" icon={<IconAlert size={20} />} hint="برنامه ترمیمی لازم دارد" />
+              <StatCard
+                label="مباحث بحرانی/ضعیف"
+                value={fa((ov.status_counts.critical ?? 0) + (ov.status_counts.weak ?? 0))}
+                tone="warning"
+                icon={<IconLayers size={20} />}
+              />
+            </section>
 
-      {/* §4 نمایه سبک معلمان */}
-      {tab === "teachers" && (
-        <section className="space-y-3">
-          <div className="card overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-slate-400 text-xs border-b border-slate-100">
-                  <th className="text-right py-2">معلم</th>
-                  <th className="py-2">درس / کلاس</th>
-                  <th className="py-2">دانش‌آموز</th>
-                  <th className="py-2">تسلط کلاس</th>
-                  <th className="py-2">ماندگاری</th>
-                  <th className="py-2">آزمون ثبت‌شده</th>
-                </tr>
-              </thead>
-              <tbody>
-                {profiles.map((p, i) => (
-                  <tr key={i} className="border-b border-slate-50">
-                    <td className="py-2 text-right font-medium">{p.teacher_name}</td>
-                    <td className="py-2 text-center">{p.subject} · کلاس {p.class_name}</td>
-                    <td className="py-2 text-center">{fa(p.students_count)}</td>
-                    <td className="py-2 text-center font-semibold">{p.class_mastery !== null ? `${fa(p.class_mastery)}٪` : "—"}</td>
-                    <td className="py-2 text-center">{p.class_retention !== null ? `${fa(p.class_retention * 100)}٪` : "—"}</td>
-                    <td className="py-2 text-center">{fa(p.platform.exam_sessions_recorded)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="text-xs text-slate-400">
-            شاخص عینی کلاس هر معلم است؛ بدون امتیاز عددی کلی. قضاوت نیاز به بررسی زمینه‌ای دارد (§4 و §8).
-          </p>
-        </section>
-      )}
+            <section className="grid gap-5 lg:grid-cols-3">
+              <Card className="lg:col-span-2">
+                <CardHeader title="مقایسه تسط کلاس‌ها" subtitle={`درس ${cmp?.subject ?? "ریاضی"} — قرمزها کلاس دارای افت`} icon={<IconChart size={17} />} />
+                {classChartData.length > 0 ? (
+                  <BarChart data={classChartData} height={220} id="admin-classes" format={(v) => `${fa(v)}٪`} />
+                ) : (
+                  <EmptyState compact title="داده‌ای برای مقایسه نیست" />
+                )}
+              </Card>
+              <Card>
+                <CardHeader title="توزیع وضعیت مباحث" icon={<IconLayers size={17} />} />
+                {statusData.length > 0 ? (
+                  <DonutChart data={statusData} size={140} thickness={20} centerSubtitle="مبحث" />
+                ) : (
+                  <EmptyState compact title="داده‌ای ثبت نشده" />
+                )}
+              </Card>
+            </section>
 
-      {/* §6 تشخیص چندعاملی */}
-      {diagnosis && (
-        <section className="card space-y-3 border-primary-200">
-          <div className="flex items-center justify-between">
-            <h2 className="font-semibold">تشخیص چندعاملی — کلاس {diagnosis.class_id}</h2>
-            <button className="btn-ghost text-xs" onClick={() => setDiagnosis(null)}>بستن</button>
-          </div>
-          <p className="text-sm">
-            تسلط کلاس: <b>{diagnosis.class_mastery !== null ? `${fa(diagnosis.class_mastery)}٪` : "—"}</b> · تعداد خطا: {fa(diagnosis.total_errors)}
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {Object.entries(diagnosis.error_causes).map(([c, n]) => (
-              <span key={c} className="badge bg-slate-100 text-slate-600">
-                {CAUSE_SHORT[c] ?? c}: {fa(n)}
-              </span>
-            ))}
-          </div>
-          <ul className="text-sm space-y-1 list-disc pr-5">
-            {diagnosis.grounded_actions_fa.map((a, i) => (
-              <li key={i}>{a}</li>
-            ))}
-          </ul>
-          <p className="text-xs text-slate-400">{diagnosis.note_fa}</p>
-        </section>
-      )}
+            <Tabs
+              items={[
+                { key: "compare", label: "مقایسه کلاس‌ها", count: cmp?.rows.length ?? 0 },
+                { key: "flags", label: "نیازمند بررسی", count: flags.length },
+                { key: "teachers", label: "نمایه معلمان", count: profiles.length },
+              ]}
+              value={tab}
+              onChange={(k) => setTab(k as Tab)}
+            />
 
-      {/* افزودن معلم — گردش کار درخواست (RBAC §5) */}
-      <section className="card space-y-3">
-        <h2 className="font-semibold">افزودن معلم (درخواست + سیاست استخدام)</h2>
-        <form onSubmit={addTeacher} className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <input
-            className="input"
-            placeholder="نام معلم"
-            value={form.full_name}
-            onChange={(e) => setForm({ ...form, full_name: e.target.value })}
-            required
-          />
-          <input
-            className="input"
-            placeholder="شناسه کاربر معلم جدید"
-            type="number"
-            value={form.employee_user_id}
-            onChange={(e) => setForm({ ...form, employee_user_id: Number(e.target.value) })}
-            required
-          />
-          <select className="input" value={form.employment_type} onChange={(e) => setForm({ ...form, employment_type: e.target.value })}>
-            <option value="official">رسمی</option>
-            <option value="contractual">قراردادی</option>
-            <option value="part_time">پاره‌وقت</option>
-            <option value="temporary">موقت</option>
-          </select>
-          <select className="input" value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })}>
-            <option value="math">ریاضی</option>
-            <option value="physics">فیزیک</option>
-            <option value="chemistry">شیمی</option>
-          </select>
-          <button className="btn-primary sm:col-span-2">ثبت درخواست</button>
-        </form>
-        <p className="text-xs text-slate-400">
-          جدول سیاست: معلم رسمی در مدرسه دولتی → تأیید خودکار؛ قراردادی → نیاز به تأیید ناحیه.
-        </p>
-      </section>
-
-      {/* کارتابل درخواست‌ها */}
-      <section className="space-y-3">
-        <h2 className="font-semibold">کارتابل درخواست‌های استخدام</h2>
-        {requests.length === 0 && <div className="card text-sm text-slate-400">درخواستی ثبت نشده.</div>}
-        {requests.map((r) => (
-          <div key={r.id} className="card flex items-center justify-between">
-            <div>
-              <p className="font-medium">{r.full_name}</p>
-              <p className="text-xs text-slate-500 mt-1">
-                {r.employment_type} · {r.subject ?? "—"} · {REQ_STATUS_FA[r.status] ?? r.status}
-              </p>
-            </div>
-            {r.status === "pending" && (
-              <div className="flex gap-2">
-                <button className="btn-primary text-xs" onClick={() => decide(r.id, true)}>تأیید</button>
-                <button className="btn-ghost text-xs" onClick={() => decide(r.id, false)}>رد</button>
-              </div>
+            {/* §7 مقایسه کلاس‌ها */}
+            {tab === "compare" && (
+              <Section>
+                {cmp && !cmp.comparison_valid && <Alert variant="warning">{cmp.min_group_note}</Alert>}
+                <DataTable
+                  columns={compareColumns}
+                  rows={cmp?.rows ?? []}
+                  keyOf={(r) => r.class_id}
+                  empty={<EmptyState compact title="کلاسی برای مقایسه نیست" />}
+                />
+                <p className="text-[11px] leading-6 text-ink-faint">
+                  پرچم «کلاس دارای افت» یعنی اختلاف ≥ ۱۰ واحد با میانگین هم‌درس‌ها — فقط پرچم است، نه حکم درباره معلم.
+                </p>
+              </Section>
             )}
-          </div>
-        ))}
-      </section>
-    </main>
+
+            {/* §5 نیازمند بررسی */}
+            {tab === "flags" && (
+              <Section>
+                <Alert variant="info">این موارد هشدار هستند، نه ارزیابی قطعی از معلم. (سند مدیر مدرسه §5)</Alert>
+                {flags.length === 0 && (
+                  <EmptyState
+                    icon={<IconShield size={26} />}
+                    title="هیچ مورد نیازمند بررسی وجود ندارد"
+                    description="همه شاخص‌ها در محدوده عادی هستند."
+                  />
+                )}
+                <div className="grid gap-4 md:grid-cols-2">
+                  {flags.map((f, i) => (
+                    <Card key={i} className="space-y-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <span className="flex items-center gap-2 text-sm font-bold text-ink">
+                          <span className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg ${FLAG_STYLE[f.flag_type] ?? "bg-slate-100 text-ink-muted"}`}>
+                            <IconAlert size={16} />
+                          </span>
+                          {f.title_fa}
+                        </span>
+                        <Badge tone="neutral">کلاس {f.class_name}</Badge>
+                      </div>
+                      <p className="text-xs leading-6 text-ink-muted">{f.evidence_fa}</p>
+                      <p className="rounded-xl bg-primary-50 px-3 py-2 text-[11px] leading-6 text-primary-800">
+                        <b>اقدام:</b> {f.action_fa}
+                      </p>
+                      <p className="num text-[11px] text-ink-faint">
+                        {subjectFa(f.subject)} · {f.teacher_name ?? "—"}
+                      </p>
+                      <Button size="sm" variant="soft" onClick={() => openDiagnosis(f.class_id)}>
+                        تشخیص چندعاملی این کلاس
+                      </Button>
+                    </Card>
+                  ))}
+                </div>
+              </Section>
+            )}
+
+            {/* §4 نمایه معلمان */}
+            {tab === "teachers" && (
+              <Section>
+                <DataTable columns={profileColumns} rows={profiles} keyOf={(p) => p.teacher_id} empty={<EmptyState compact title="نمایه‌ای ثبت نشده" />} />
+                <p className="text-[11px] leading-6 text-ink-faint">
+                  شاخص عینی کلاس هر معلم است؛ بدون امتیاز عددی کلی. قضاوت نیاز به بررسی زمینه‌ای دارد (§4 و §8).
+                </p>
+              </Section>
+            )}
+
+            {/* §6 تشخیص چندعاملی */}
+            <Modal
+              open={diagnosis !== null}
+              onClose={() => setDiagnosis(null)}
+              title={diagnosis ? `تشخیص چندعاملی — کلاس ${diagnosis.class_id}` : ""}
+              size="lg"
+              footer={
+                <Button variant="ghost" onClick={() => setDiagnosis(null)}>
+                  بستن
+                </Button>
+              }
+            >
+              {diagnosis && (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Badge tone="primary">تسط کلاس: {diagnosis.class_mastery !== null ? `${fa(diagnosis.class_mastery)}٪` : "—"}</Badge>
+                    <Badge tone="danger">تعداد خطا: {fa(diagnosis.total_errors)}</Badge>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {Object.entries(diagnosis.error_causes).map(([c, n]) => (
+                      <Badge key={c} tone="neutral">
+                        {CAUSE_SHORT[c] ?? c}: {fa(n)}
+                      </Badge>
+                    ))}
+                  </div>
+                  {diagnosis.weak_topics.length > 0 && (
+                    <div className="rounded-xl bg-surface-sunken p-3">
+                      <p className="mb-2 text-xs font-bold text-ink">مباحث ضعیف</p>
+                      <ul className="space-y-1 text-xs">
+                        {diagnosis.weak_topics.map((t) => (
+                          <li key={t.topic_id} className="flex items-center justify-between">
+                            <span>{t.title}</span>
+                            <span className="num text-ink-faint">{fa(t.weak_students)} دانش‌آموز</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <div>
+                    <p className="mb-2 text-xs font-bold text-ink">اقدامات پیشنهادی</p>
+                    <ul className="space-y-1.5 text-xs leading-6">
+                      {diagnosis.grounded_actions_fa.map((a, i) => (
+                        <li key={i} className="flex items-start gap-2">
+                          <span className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full bg-success-50 text-success-600">
+                            <IconCheckCircle size={11} />
+                          </span>
+                          {a}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <p className="text-[11px] leading-6 text-ink-faint">{diagnosis.note_fa}</p>
+                </div>
+              )}
+            </Modal>
+
+            {/* افزودن معلم */}
+            <Card>
+              <CardHeader
+                title="افزودن معلم (درخواست + سیاست استخدام)"
+                subtitle="معلم رسمی در مدرسه دولتی → تأیید خودکار؛ قراردادی → نیاز به تأیید ناحیه."
+                icon={<IconPlus size={17} />}
+              />
+              <form onSubmit={addTeacher} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Field label="نام معلم" required>
+                  <Input
+                    placeholder="نام معلم"
+                    value={form.full_name}
+                    onChange={(e) => setForm({ ...form, full_name: e.target.value })}
+                    required
+                  />
+                </Field>
+                <Field label="شناسه کاربر معلم جدید" required>
+                  <Input
+                    placeholder="شناسه کاربر"
+                    type="number"
+                    value={form.employee_user_id}
+                    onChange={(e) => setForm({ ...form, employee_user_id: Number(e.target.value) })}
+                    required
+                  />
+                </Field>
+                <Field label="نوع استخدام">
+                  <Select value={form.employment_type} onChange={(e) => setForm({ ...form, employment_type: e.target.value })}>
+                    <option value="official">رسمی</option>
+                    <option value="contractual">قراردادی</option>
+                    <option value="part_time">پاره‌وقت</option>
+                    <option value="temporary">موقت</option>
+                  </Select>
+                </Field>
+                <Field label="درس">
+                  <Select value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })}>
+                    <option value="math">ریاضی</option>
+                    <option value="physics">فیزیک</option>
+                    <option value="chemistry">شیمی</option>
+                  </Select>
+                </Field>
+                <div className="sm:col-span-2">
+                  <Button type="submit" loading={submitting} className="w-full sm:w-auto" icon={<IconPlus size={15} />}>
+                    ثبت درخواست
+                  </Button>
+                </div>
+              </form>
+            </Card>
+
+            {/* کارتابل درخواست‌ها */}
+            <Section title="کارتابل درخواست‌های استخدام" subtitle="درخواست‌های در انتظار، برای تأیید ناحیه ارسال می‌شوند.">
+              {requests.length === 0 ? (
+                <EmptyState icon={<IconSchool size={26} />} title="درخواستی ثبت نشده" description="درخواست‌های جدید استخدام اینجا نمایش داده می‌شود." />
+              ) : (
+                <div className="space-y-3">
+                  {requests.map((r) => (
+                    <Card key={r.id} className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <span className="grid h-9 w-9 place-items-center rounded-xl bg-brand-gradient-soft text-primary-600">
+                          <IconUsers size={17} />
+                        </span>
+                        <div>
+                          <p className="text-sm font-bold text-ink">{r.full_name}</p>
+                          <p className="num mt-0.5 text-[11px] text-ink-muted">
+                            {EMPLOYMENT_FA[r.employment_type] ?? r.employment_type} · {r.subject ?? "—"} · {r.organization}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Badge tone={statusTone(r.status)} dot>
+                          {REQ_STATUS_FA[r.status] ?? r.status}
+                        </Badge>
+                        {r.status === "pending" && (
+                          <>
+                            <Button size="sm" variant="success" onClick={() => decide(r.id, true)} icon={<IconCheckCircle size={14} />}>
+                              تأیید
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => decide(r.id, false)} icon={<IconX size={14} />}>
+                              رد
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+              )}
+            </Section>
+          </>
+        )}
+      </div>
+    </AppShell>
   );
 }

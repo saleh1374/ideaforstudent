@@ -1,8 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, getToken } from "@/lib/api";
-import { NEED_FA, NEED_COLOR, CAUSE_SHORT, STATUS_FA, STATUS_COLOR, fa } from "@/lib/labels";
+import { NEED_FA, NEED_COLOR, CAUSE_SHORT, STATUS_FA, fa, subjectFa } from "@/lib/labels";
+import { AppShell } from "@/components/ui/shell";
+import { PageHeader } from "@/components/ui/page-header";
+import { Card, CardHeader, Section } from "@/components/ui/card";
+import { StatCard } from "@/components/ui/stat";
+import { Alert } from "@/components/ui/alert";
+import { Badge, statusTone } from "@/components/ui/badge";
+import { EmptyState } from "@/components/ui/empty";
+import { Tabs } from "@/components/ui/tabs";
+import { DataTable, type Column } from "@/components/ui/table";
+import { ProgressBar } from "@/components/ui/progress";
+import { BarChart, DonutChart } from "@/components/ui/charts";
+import { toast } from "@/components/ui/toast";
+import { IconAlert, IconChart, IconLayers, IconTarget, IconUsers } from "@/components/ui/icons";
 
 type ClassInfo = {
   class_id: number;
@@ -56,10 +69,13 @@ export default function TeacherPage() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [rootCause, setRootCause] = useState<RootCause | null>(null);
   const [msg, setMsg] = useState("");
+  const [loading, setLoading] = useState(true);
 
   const loadClass = useCallback(async (cid: number) => {
     setActiveClass(cid);
     setRootCause(null);
+    setRadar([]);
+    setGroups([]);
     try {
       const r = await api<{ rows: RadarRow[] }>(`/teacher/classes/${cid}/radar`);
       setRadar(r.rows);
@@ -67,6 +83,9 @@ export default function TeacherPage() {
       setGroups(g.groups.filter((x) => x.students.length > 0));
     } catch (e) {
       setMsg(e instanceof Error ? e.message : "خطا");
+      toast(e instanceof Error ? e.message : "خطا در بارگذاری کلاس", "error");
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -79,8 +98,12 @@ export default function TeacherPage() {
       .then((d) => {
         setClasses(d.classes);
         if (d.classes.length > 0) loadClass(d.classes[0].class_id);
+        else setLoading(false);
       })
-      .catch((e) => setMsg(e instanceof Error ? e.message : "خطا"));
+      .catch((e) => {
+        setMsg(e instanceof Error ? e.message : "خطا");
+        setLoading(false);
+      });
   }, [loadClass]);
 
   async function openRootCause(topicId: number) {
@@ -93,160 +116,270 @@ export default function TeacherPage() {
     }
   }
 
-  if (msg && classes.length === 0) return <main className="p-6 text-red-600">{msg}</main>;
-  if (classes.length === 0) return <main className="p-6 text-slate-400">کلاسی به شما تخصیص نیافته است.</main>;
+  const stats = useMemo(() => {
+    const withData = radar.filter((r) => r.students_with_data > 0);
+    const avgMastery = withData.length > 0 ? withData.reduce((s, r) => s + r.avg_mastery, 0) / withData.length : null;
+    const weakTopics = radar.filter((r) => r.status === "weak" || r.status === "critical").length;
+    const prereqWeak = radar.filter((r) => r.prereq_weak).length;
+    const weakStudents = radar.reduce((s, r) => s + r.weak_count, 0);
+    return { avgMastery, weakTopics, prereqWeak, weakStudents };
+  }, [radar]);
+
+  const chartData = useMemo(
+    () =>
+      [...radar]
+        .filter((r) => r.students_with_data > 0)
+        .sort((a, b) => a.avg_mastery - b.avg_mastery)
+        .slice(0, 6)
+        .map((r) => ({ label: r.title, value: Math.round(r.avg_mastery), color: r.avg_mastery < 50 ? "#f43f5e" : r.avg_mastery < 70 ? "#f59e0b" : "#6366f1" })),
+    [radar]
+  );
+
+  const statusData = useMemo(() => {
+    const counts: Record<string, number> = {};
+    radar.forEach((r) => {
+      counts[r.status] = (counts[r.status] ?? 0) + 1;
+    });
+    const colors: Record<string, string> = {
+      mastered: "#10b981",
+      consolidating: "#0ea5e9",
+      weak: "#f59e0b",
+      critical: "#f43f5e",
+      unknown: "#cbd5e1",
+    };
+    return Object.entries(counts).map(([k, v]) => ({ label: STATUS_FA[k] ?? k, value: v, color: colors[k] }));
+  }, [radar]);
+
+  const columns: Column<RadarRow>[] = [
+    {
+      key: "title",
+      header: "مبحث",
+      render: (row) => (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-semibold text-ink">{row.title}</span>
+          {row.prereq_weak && (
+            <Badge tone="warning" dot>
+              پیش‌نیاز
+            </Badge>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: "mastery",
+      header: "تسط",
+      align: "center",
+      render: (row) => (
+        <div className="mx-auto w-28">
+          <span className="num mb-1 block text-xs font-bold text-ink">{fa(row.avg_mastery)}٪</span>
+          <ProgressBar value={row.avg_mastery} size="sm" tone={row.avg_mastery < 50 ? "danger" : row.avg_mastery < 70 ? "warning" : "success"} />
+        </div>
+      ),
+    },
+    {
+      key: "retention",
+      header: "ماندگاری",
+      align: "center",
+      render: (row) => <span className="num font-semibold">{fa(row.avg_retention * 100)}٪</span>,
+    },
+    {
+      key: "status",
+      header: "وضعیت",
+      align: "center",
+      render: (row) => <Badge tone={statusTone(row.status)}>{STATUS_FA[row.status] ?? row.status}</Badge>,
+    },
+    {
+      key: "weak",
+      header: "نیازمند توجه",
+      align: "center",
+      render: (row) => (
+        <span className={`num font-bold ${row.weak_count > 0 ? "text-danger-600" : "text-ink-faint"}`}>
+          {fa(row.weak_count)} / {fa(row.total_students)}
+        </span>
+      ),
+    },
+    {
+      key: "causes",
+      header: "علت خطاها",
+      align: "center",
+      render: (row) => (
+        <div className="flex flex-wrap justify-center gap-1">
+          {Object.entries(row.error_causes).map(([c, n]) => (
+            <span key={c} className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-ink-muted">
+              {CAUSE_SHORT[c] ?? c}: {fa(n)}
+            </span>
+          ))}
+        </div>
+      ),
+    },
+  ];
 
   return (
-    <main className="max-w-5xl mx-auto p-6 space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-bold">پنل معلم — هوش کلاس</h1>
-        <div className="flex items-center gap-2">
-          {classes.map((c) => (
-            <button
-              key={c.class_id}
-              className={`btn text-xs ${activeClass === c.class_id ? "bg-primary-600 text-white" : "border border-slate-300"}`}
-              onClick={() => loadClass(c.class_id)}
+    <AppShell>
+      <div className="space-y-6">
+        <PageHeader
+          title="پنل معلم — هوش کلاس"
+          description="رادار مباحث، ریشه‌یابی ضعف و گروه‌بندی نیاز دانش‌آموزان — بدون رتبه‌بندی."
+          crumbs={[{ label: "دانشیار" }, { label: "آموزشی" }, { label: "هوش کلاس" }]}
+          badge={classes.length > 0 ? <Badge tone="primary" dot>{fa(classes.length)} کلاس</Badge> : undefined}
+        />
+
+        {msg && classes.length === 0 && <Alert variant="danger" title="خطا">{msg}</Alert>}
+
+        {classes.length === 0 && !msg && (
+          <EmptyState
+            icon={<IconUsers size={26} />}
+            title="کلاسی به شما تخصیص نیافته است"
+            description="هنوز کلاسی برای این حساب ثبت نشده؛ با مدیر مدرسه هماهنگ کنید."
+          />
+        )}
+
+        {classes.length > 0 && (
+          <>
+            {/* class switcher */}
+            <Tabs
+              items={classes.map((c) => ({
+                key: String(c.class_id),
+                label: `کلاس ${c.name} — ${subjectFa(c.subject)}`,
+                count: c.students_count,
+              }))}
+              value={String(activeClass ?? "")}
+              onChange={(k) => loadClass(Number(k))}
+            />
+
+            {/* KPIs */}
+            <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+              <StatCard
+                label="میانگین تسط کلاس"
+                value={stats.avgMastery !== null ? `${fa(stats.avgMastery, 1)}٪` : "—"}
+                tone="primary"
+                icon={<IconTarget size={20} />}
+                hint="میانگین مباحث دارای داده"
+              />
+              <StatCard label="مباحث نیازمند کار" value={fa(stats.weakTopics)} tone="danger" icon={<IconAlert size={20} />} hint="ضعیف + بحرانی" />
+              <StatCard label="پیش‌نیاز ضعیف" value={fa(stats.prereqWeak)} tone="warning" icon={<IconLayers size={20} />} hint="نیازمند ریشه‌یابی" />
+              <StatCard label="دانش‌آموزان نیازمند توجه" value={fa(stats.weakStudents)} tone="accent" icon={<IconUsers size={20} />} hint="جمع امتیازها در هر مبحث" />
+            </section>
+
+            {msg && <Alert variant="warning">{msg}</Alert>}
+
+            {/* charts */}
+            <section className="grid gap-5 lg:grid-cols-3">
+              <Card className="lg:col-span-2">
+                <CardHeader
+                  title="ضعیف‌ترین مباحث کلاس"
+                  subtitle="۶ مبحث با کمترین میانگین تسط — برای برنامه ترمیم گروهی"
+                  icon={<IconChart size={17} />}
+                />
+                {chartData.length > 0 ? (
+                  <BarChart data={chartData} height={230} id="teacher-weak" format={(v) => `${fa(v)}٪`} />
+                ) : (
+                  <EmptyState compact title="داده‌ای برای نمودار نیست" description="پس از ثبت آزمون، نمودار نمایش داده می‌شود." />
+                )}
+              </Card>
+              <Card>
+                <CardHeader title="توزیع وضعیت مباحث" icon={<IconChart size={17} />} />
+                {statusData.length > 0 ? (
+                  <DonutChart data={statusData} size={140} thickness={20} centerSubtitle="مبحث" />
+                ) : (
+                  <EmptyState compact title="مبحثی ثبت نشده" />
+                )}
+              </Card>
+            </section>
+
+            {/* radar table */}
+            <Section title="رادار مباحث کلاس" subtitle="مرتب بر اساس ضعف — روی هر ردیف کلیک کن تا ریشه ضعف با گراف پیش‌نیاز باز شود.">
+              <DataTable
+                columns={columns}
+                rows={radar}
+                keyOf={(r) => r.topic_id}
+                loading={loading}
+                onRowClick={(r) => openRootCause(r.topic_id)}
+                empty={<EmptyState compact title="هنوز داده‌ای برای این کلاس ثبت نشده" description="با اولین آزمون، رادار مباحث پر می‌شود." />}
+              />
+            </Section>
+
+            {/* root cause */}
+            {rootCause && (
+              <Card variant="brand" className="animate-fade-in-up space-y-4">
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="text-sm font-extrabold text-primary-900">
+                    ریشه‌یابی: {rootCause.topic.title}{" "}
+                    <span className="num text-xs font-bold text-primary-600">({rootCause.topic.mastery !== null ? `${fa(rootCause.topic.mastery)}٪` : "بدون داده"})</span>
+                  </h2>
+                  <button
+                    onClick={() => setRootCause(null)}
+                    className="rounded-lg px-2 py-1 text-xs font-semibold text-primary-700 transition hover:bg-white"
+                  >
+                    بستن
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  {rootCause.chain.map((step, i) => (
+                    <span key={step.topic_id} className="flex items-center gap-2">
+                      {i > 0 && <span className="text-primary-300">←</span>}
+                      <Badge
+                        tone={i === rootCause.chain.length - 1 && rootCause.root_reason === "prerequisite" ? "danger" : "neutral"}
+                      >
+                        {step.title} — {step.mastery !== null ? `${fa(step.mastery)}٪` : "بدون داده"}
+                      </Badge>
+                    </span>
+                  ))}
+                </div>
+
+                <Alert variant={rootCause.root_reason === "prerequisite" ? "warning" : "info"} title="تشخیص">
+                  {rootCause.diagnosis}
+                </Alert>
+              </Card>
+            )}
+
+            {/* need groups */}
+            <Section
+              title="گروه‌بندی نیاز — نه رتبه"
+              subtitle="دو دانش‌آموز با نمره یکسان می‌توانند نیاز کاملاً متفاوت داشته باشند."
             >
-              کلاس {c.name} ({c.subject}) — {fa(c.students_count)} نفر
-            </button>
-          ))}
-          <button
-            className="btn-ghost text-xs"
-            onClick={() => {
-              localStorage.removeItem("daneshyar_token");
-              window.location.href = "/login";
-            }}
-          >
-            خروج
-          </button>
-        </div>
-      </header>
-
-      {msg && <div className="card border-amber-300 bg-amber-50 text-sm text-amber-800">{msg}</div>}
-
-      {/* رادار مباحث (سند معلم §3) */}
-      <section className="card space-y-3">
-        <h2 className="font-semibold">رادار مباحث کلاس — مرتب بر اساس ضعف</h2>
-        <p className="text-xs text-slate-400">روی هر ردیف کلیک کنید تا ریشه ضعف با گراف پیش‌نیاز باز شود.</p>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-slate-400 text-xs border-b border-slate-100">
-                <th className="text-right py-2">مبحث</th>
-                <th className="py-2">تسلط</th>
-                <th className="py-2">ماندگاری</th>
-                <th className="py-2">وضعیت</th>
-                <th className="py-2">نیازمند توجه</th>
-                <th className="py-2">علت خطاها</th>
-              </tr>
-            </thead>
-            <tbody>
-              {radar.map((row) => (
-                <tr
-                  key={row.topic_id}
-                  className="border-b border-slate-50 hover:bg-primary-50/40 cursor-pointer"
-                  onClick={() => openRootCause(row.topic_id)}
-                >
-                  <td className="py-2 text-right font-medium">
-                    {row.title}
-                    {row.prereq_weak && (
-                      <span className="badge bg-orange-100 text-orange-700 mr-2" title="پیش‌نیاز این مبحث ضعیف است">
-                        ⚠ پیش‌نیاز
-                      </span>
-                    )}
-                  </td>
-                  <td className="py-2 text-center font-semibold">{fa(row.avg_mastery)}٪</td>
-                  <td className="py-2 text-center">{fa(row.avg_retention * 100)}٪</td>
-                  <td className="py-2 text-center">
-                    <span className={`badge ${STATUS_COLOR[row.status] ?? STATUS_COLOR.unknown}`}>{STATUS_FA[row.status]}</span>
-                  </td>
-                  <td className="py-2 text-center">
-                    <span className={row.weak_count > 0 ? "text-red-600 font-medium" : "text-slate-300"}>
-                      {fa(row.weak_count)} / {fa(row.total_students)}
-                    </span>
-                  </td>
-                  <td className="py-2 text-center">
-                    <div className="flex flex-wrap justify-center gap-1">
-                      {Object.entries(row.error_causes).map(([c, n]) => (
-                        <span key={c} className="badge bg-slate-100 text-slate-600 text-[10px]">
-                          {CAUSE_SHORT[c] ?? c}: {fa(n)}
-                        </span>
-                      ))}
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {groups.map((g) => (
+                  <Card key={g.need} className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className={`badge ${NEED_COLOR[g.need]}`}>{NEED_FA[g.need] ?? g.need}</span>
+                      <span className="num text-xs text-ink-faint">{fa(g.students.length)} نفر</span>
                     </div>
-                  </td>
-                </tr>
-              ))}
-              {radar.length === 0 && (
-                <tr>
-                  <td colSpan={6} className="text-center text-slate-400 py-6">
-                    هنوز داده‌ای برای این کلاس ثبت نشده.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      {/* ریشه‌یابی (سند معلم §4) */}
-      {rootCause && (
-        <section className="card space-y-3 border-primary-200">
-          <h2 className="font-semibold">
-            ریشه‌یابی: {rootCause.topic.title} <span className="text-slate-400 text-sm">({fa(rootCause.topic.mastery)}٪)</span>
-          </h2>
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            {rootCause.chain.map((step, i) => (
-              <span key={step.topic_id} className="flex items-center gap-2">
-                {i > 0 && <span className="text-slate-300">←</span>}
-                <span
-                  className={`badge ${
-                    i === rootCause.chain.length - 1 && rootCause.root_reason === "prerequisite"
-                      ? "bg-red-100 text-red-700"
-                      : "bg-slate-100 text-slate-600"
-                  }`}
-                >
-                  {step.title} — {step.mastery !== null ? `${fa(step.mastery)}٪` : "بدون داده"}
-                </span>
-              </span>
-            ))}
-          </div>
-          <div className={`rounded-xl p-3 text-sm ${rootCause.root_reason === "prerequisite" ? "bg-orange-50 text-orange-800" : "bg-sky-50 text-sky-800"}`}>
-            {rootCause.diagnosis}
-          </div>
-        </section>
-      )}
-
-      {/* گروه‌بندی پنج‌گانه نیاز (سند معلم §6) */}
-      <section className="space-y-3">
-        <h2 className="font-semibold">گروه‌بندی نیاز — نه رتبه</h2>
-        <p className="text-xs text-slate-400">دو دانش‌آموز با نمره یکسان می‌توانند نیاز کاملاً متفاوت داشته باشند.</p>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {groups.map((g) => (
-            <div key={g.need} className="card space-y-2">
-              <div className="flex items-center justify-between">
-                <span className={`badge ${NEED_COLOR[g.need]}`}>{NEED_FA[g.need]}</span>
-                <span className="text-xs text-slate-400">{fa(g.students.length)} نفر</span>
-              </div>
-              <p className="text-xs text-slate-500">اقدام پیشنهادی: {g.action}</p>
-              <ul className="space-y-1 text-sm">
-                {g.students.map((s) => (
-                  <li key={s.student_id} className="flex items-center justify-between">
-                    <span>
-                      {s.full_name}
-                      {s.prereq_weak && <span className="text-orange-500 text-xs"> ⚠</span>}
-                    </span>
-                    <span className="text-xs text-slate-400">
-                      تسلط {fa(s.mastery)}٪ · ماندگاری {fa(s.retention * 100)}٪
-                      {s.repeat_errors > 0 && <span className="text-red-500"> · {fa(s.repeat_errors)} خطای باز</span>}
-                    </span>
-                  </li>
+                    <p className="rounded-xl bg-surface-sunken px-3 py-2 text-[11px] leading-6 text-ink-muted">
+                      <b className="text-ink">اقدام پیشنهادی:</b> {g.action}
+                    </p>
+                    <ul className="divide-y divide-line-soft">
+                      {g.students.map((s) => (
+                        <li key={s.student_id} className="flex items-center justify-between gap-3 py-2 text-xs">
+                          <span className="flex items-center gap-2 font-semibold text-ink">
+                            {s.full_name}
+                            {s.prereq_weak && <span className="text-warning-500" title="پیش‌نیاز ضعیف">⚠</span>}
+                          </span>
+                          <span className="num text-ink-faint">
+                            تسط {fa(s.mastery)}٪ · ماندگاری {fa(s.retention * 100)}٪
+                            {s.repeat_errors > 0 && <span className="text-danger-500"> · {fa(s.repeat_errors)} خطای باز</span>}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </Card>
                 ))}
-              </ul>
-            </div>
-          ))}
-          {groups.length === 0 && <div className="card text-sm text-slate-400 md:col-span-2">هنوز گروهی تشکیل نشده — داده کافی نیست.</div>}
-        </div>
-      </section>
-    </main>
+                {groups.length === 0 && !loading && (
+                  <div className="md:col-span-2">
+                    <EmptyState
+                      compact
+                      icon={<IconLayers size={24} />}
+                      title="هنوز گروهی تشکیل نشده"
+                      description="داده کافی نیست؛ با ثبت آزمون و تمرین، گروه‌های نیاز ساخته می‌شوند."
+                    />
+                  </div>
+                )}
+              </div>
+            </Section>
+          </>
+        )}
+      </div>
+    </AppShell>
   );
 }

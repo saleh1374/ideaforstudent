@@ -2,7 +2,21 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, getToken } from "@/lib/api";
-import { fa } from "@/lib/labels";
+import { fa, subjectFa } from "@/lib/labels";
+import { AppShell } from "@/components/ui/shell";
+import { PageHeader } from "@/components/ui/page-header";
+import { Card, CardHeader, Section } from "@/components/ui/card";
+import { StatCard } from "@/components/ui/stat";
+import { Alert } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty";
+import { Tabs } from "@/components/ui/tabs";
+import { DataTable, type Column } from "@/components/ui/table";
+import { BarChart } from "@/components/ui/charts";
+import { SkeletonStats, SkeletonTable } from "@/components/ui/skeleton";
+import { toast } from "@/components/ui/toast";
+import { IconChart, IconLayers, IconMap, IconRefresh, IconSchool, IconUsers } from "@/components/ui/icons";
 
 type Overview = {
   scope: string;
@@ -34,7 +48,8 @@ export default function GeoPage() {
   const [rows, setRows] = useState<TopicRow[]>([]);
   const [role, setRole] = useState("");
   const [error, setError] = useState("");
-  const [refreshMsg, setRefreshMsg] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async (t: Tab) => {
     if (!getToken()) {
@@ -42,6 +57,8 @@ export default function GeoPage() {
       return;
     }
     setOv(null);
+    setLoading(true);
+    setError("");
     try {
       const me = await api<{ role: string }>("/auth/me");
       setRole(me.role);
@@ -54,128 +71,165 @@ export default function GeoPage() {
       setRows(s.rows);
     } catch (e) {
       setError(e instanceof Error ? e.message : "خطا");
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    setRefreshMsg("");
     load(tab);
   }, [tab, load]);
 
   async function refresh() {
-    setRefreshMsg("");
+    setRefreshing(true);
     try {
       const res = await api<{ national: { written: number; suppressed: number } }>("/geo/national/refresh", { method: "POST" });
       await load(tab);
-      setRefreshMsg(`✓ بازمحاسبه شد: ${fa(res.national.written)} مبحث (${fa(res.national.suppressed)} سرکوب‌شده)`);
+      toast(`بازمحاسبه شد: ${fa(res.national.written)} مبحث (${fa(res.national.suppressed)} سرکوب‌شده)`, "success");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "خطا");
+      toast(e instanceof Error ? e.message : "خطا در بازمحاسبه", "error");
+    } finally {
+      setRefreshing(false);
     }
   }
 
-  if (error) return <main className="p-6 text-red-600">{error}</main>;
-
   const title = tab === "province" ? "مدیر کل استان" : "وزارت / سطح ملی";
 
+  const columns: Column<TopicRow>[] = [
+    { key: "topic", header: "مبحث", render: (row) => <span className="num font-semibold text-ink">#{row.topic_id}</span> },
+    { key: "subject", header: "درس", align: "center", render: (row) => <Badge tone="neutral">{row.subject ?? "—"}</Badge> },
+    { key: "students", header: "دانش‌آموز", align: "center", render: (row) => <span className="num">{fa(row.students_count)}</span> },
+    {
+      key: "mastery",
+      header: "تسط",
+      align: "center",
+      render: (row) =>
+        row.suppressed ? (
+          <span className="text-[11px] text-ink-faint">زیر حد نصاب</span>
+        ) : (
+          <span className="num font-bold text-ink">{row.avg_mastery !== null ? `${fa(row.avg_mastery)}٪` : "—"}</span>
+        ),
+    },
+    {
+      key: "retention",
+      header: "ماندگاری",
+      align: "center",
+      render: (row) => <span className="num">{row.suppressed || row.avg_retention === null ? "—" : `${fa(row.avg_retention * 100)}٪`}</span>,
+    },
+    {
+      key: "weak",
+      header: "سهم ضعیف",
+      align: "center",
+      render: (row) => (
+        <span className={`num font-semibold ${!row.suppressed && (row.weak_ratio ?? 0) >= 0.4 ? "text-danger-600" : "text-ink-muted"}`}>
+          {row.suppressed || row.weak_ratio === null ? "—" : `${fa(row.weak_ratio * 100)}٪`}
+        </span>
+      ),
+    },
+  ];
+
+  const chartData = (ov?.worst_topics ?? [])
+    .filter((t) => t.avg_mastery !== null)
+    .slice(0, 7)
+    .map((t) => ({
+      label: t.subject ? `${subjectFa(t.subject)} #${t.topic_id}` : `#${t.topic_id}`,
+      value: Math.round(t.avg_mastery as number),
+      color: (t.avg_mastery as number) < 50 ? "#f43f5e" : "#f59e0b",
+    }));
+
   return (
-    <main className="max-w-5xl mx-auto p-6 space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-bold">{title}</h1>
-          <p className="text-xs text-slate-400">تجمیع‌های province / national_topic_stats — عددها تابع حداقل جمعیت ۱۰</p>
-        </div>
-        <div className="flex gap-2">
-          {(role === "ministry" || role === "province_admin") && (
-            <button className="btn-ghost text-xs" onClick={refresh}>
-              بازمحاسبه تجمیع‌ها
-            </button>
-          )}
-          <button
-            className="btn-ghost text-xs"
-            onClick={() => {
-              localStorage.removeItem("daneshyar_token");
-              window.location.href = "/login";
-            }}
-          >
-            خروج
-          </button>
-        </div>
-      </header>
+    <AppShell>
+      <div className="space-y-6">
+        <PageHeader
+          title={title}
+          description="تجمیع‌های province / national_topic_stats — عددها تابع حداقل جمعیت ۱۰ هستند."
+          crumbs={[{ label: "دانشیار" }, { label: "مدیریت" }, { label: title }]}
+          badge={role ? <Badge tone="accent" dot>{role === "ministry" ? "وزارت" : "مدیر کل استان"}</Badge> : undefined}
+          actions={
+            (role === "ministry" || role === "province_admin") && (
+              <Button variant="soft" size="sm" loading={refreshing} icon={<IconRefresh size={15} />} onClick={refresh}>
+                بازمحاسبه تجمیع‌ها
+              </Button>
+            )
+          }
+        />
 
-      <nav className="flex gap-2">
-        {(["province", "national"] as Tab[]).map((t) => (
-          <button
-            key={t}
-            className={`btn text-sm ${tab === t ? "bg-primary-600 text-white" : "border border-slate-300 hover:bg-slate-50"}`}
-            onClick={() => setTab(t)}
-          >
-            {t === "province" ? "دید استان" : "دید کشور"}
-          </button>
-        ))}
-      </nav>
+        {error && <Alert variant="danger" title="خطا در دریافت داده">{error}</Alert>}
 
-      {refreshMsg && <div className="card border-primary-200 bg-primary-50 text-sm text-primary-700">{refreshMsg}</div>}
+        <Tabs
+          items={[
+            { key: "province", label: "دید استان" },
+            { key: "national", label: "دید کشور" },
+          ]}
+          value={tab}
+          onChange={(k) => setTab(k as Tab)}
+        />
 
-      {ov && (
-        <>
-          <section className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <div className="card text-center">
-              <p className="text-xs text-slate-500">مدارس</p>
-              <p className="text-2xl font-bold mt-1">{fa(ov.schools_count)}</p>
-            </div>
-            <div className="card text-center">
-              <p className="text-xs text-slate-500">دانش‌آموزان دارای داده</p>
-              <p className="text-2xl font-bold mt-1">{fa(ov.students_count)}</p>
-            </div>
-            <div className="card text-center">
-              <p className="text-xs text-slate-500">میانگین تسلط</p>
-              <p className="text-2xl font-bold mt-1 text-emerald-600">
-                {ov.suppressed ? <span className="text-slate-400 text-base">زیر حد نصاب</span> : `${fa(ov.avg_mastery)}٪`}
-              </p>
-            </div>
-            <div className="card text-center">
-              <p className="text-xs text-slate-500">مباحث نیازمند برنامه</p>
-              <p className="text-2xl font-bold mt-1 text-red-600">{fa(ov.worst_topics.length)}</p>
-            </div>
-          </section>
+        {loading && (
+          <div className="space-y-5">
+            <SkeletonStats count={4} />
+            <SkeletonTable rows={6} cols={6} />
+          </div>
+        )}
 
-          <div className="card border-slate-200 bg-slate-50 text-xs text-slate-600">{ov.note_fa}</div>
+        {ov && !loading && (
+          <>
+            <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+              <StatCard label="مدارس" value={fa(ov.schools_count)} tone="primary" icon={<IconSchool size={20} />} />
+              <StatCard label="دانش‌آموزان دارای داده" value={fa(ov.students_count)} tone="accent" icon={<IconUsers size={20} />} />
+              <StatCard
+                label="میانگین تسط"
+                value={ov.suppressed ? "زیر حد نصاب" : ov.avg_mastery !== null ? `${fa(ov.avg_mastery)}٪` : "—"}
+                tone="success"
+                icon={<IconChart size={20} />}
+                hint={ov.suppressed ? `کمتر از ${fa(ov.min_group)} نفر` : "همه مباحث"}
+              />
+              <StatCard label="مباحث نیازمند برنامه" value={fa(ov.worst_topics.length)} tone="danger" icon={<IconLayers size={20} />} hint="ضعیف‌ترین‌ها" />
+            </section>
 
-          <section className="card overflow-x-auto">
-            <h2 className="font-semibold mb-3">مباحث با کمترین تسط (تجمیع ملی/استانی)</h2>
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-slate-400 text-xs border-b border-slate-100">
-                  <th className="text-right py-2">مبحث</th>
-                  <th className="py-2">درس</th>
-                  <th className="py-2">دانش‌آموز</th>
-                  <th className="py-2">تسط</th>
-                  <th className="py-2">ماندگاری</th>
-                  <th className="py-2">سهم ضعیف</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => (
-                  <tr key={r.topic_id} className="border-b border-slate-50">
-                    <td className="py-2 text-right">#{r.topic_id}</td>
-                    <td className="py-2 text-center">{r.subject ?? "—"}</td>
-                    <td className="py-2 text-center">{fa(r.students_count)}</td>
-                    <td className="py-2 text-center font-semibold">
-                      {r.suppressed ? <span className="text-slate-400 text-xs">زیر حد نصاب</span> : `${fa(r.avg_mastery)}٪`}
-                    </td>
-                    <td className="py-2 text-center">
-                      {r.suppressed || r.avg_retention === null ? "—" : `${fa(r.avg_retention * 100)}٪`}
-                    </td>
-                    <td className="py-2 text-center">
-                      {r.suppressed || r.weak_ratio === null ? "—" : `${fa(r.weak_ratio * 100)}٪`}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
-        </>
-      )}
-    </main>
+            <Alert variant="info">{ov.note_fa}</Alert>
+
+            <section className="grid gap-5 lg:grid-cols-3">
+              <Card className="lg:col-span-2">
+                <CardHeader
+                  title="ضعیف‌ترین مباحث (تجمیع)"
+                  subtitle="بر اساس میانگین تسط — پایه برنامه استانی/ملی"
+                  icon={<IconChart size={17} />}
+                />
+                {chartData.length > 0 ? (
+                  <BarChart data={chartData} height={230} id="geo-worst" format={(v) => `${fa(v)}٪`} />
+                ) : (
+                  <EmptyState compact title="داده‌ای زیر حد نصاب نیست" description="برای این محدوده، مبحثی قابل نمایش نیست." />
+                )}
+              </Card>
+              <Card>
+                <CardHeader title="دامنه داده" icon={<IconMap size={17} />} />
+                <ul className="space-y-3 text-xs">
+                  <li className="flex items-center justify-between rounded-xl bg-surface-sunken px-3.5 py-3">
+                    <span className="text-ink-muted">حداقل جمعیت</span>
+                    <span className="num font-bold text-ink">{fa(ov.min_group)} نفر</span>
+                  </li>
+                  <li className="flex items-center justify-between rounded-xl bg-surface-sunken px-3.5 py-3">
+                    <span className="text-ink-muted">محدوده</span>
+                    <span className="font-bold text-ink">{tab === "province" ? "استانی" : "ملی"}</span>
+                  </li>
+                  <li className="flex items-center justify-between rounded-xl bg-surface-sunken px-3.5 py-3">
+                    <span className="text-ink-muted">تعداد ردیف‌های قابل نمایش</span>
+                    <span className="num font-bold text-ink">{fa(rows.filter((r) => !r.suppressed).length)}</span>
+                  </li>
+                </ul>
+                <p className="mt-3 text-[11px] leading-6 text-ink-faint">
+                  اعداد زیر حد نصاب نمایش داده نمی‌شوند — نه تخمین، نه رنگ (حریم خصوصی).
+                </p>
+              </Card>
+            </section>
+
+            <Section title="مباحث با کمترین تسط (تجمیع ملی/استانی)">
+              <DataTable columns={columns} rows={rows} keyOf={(r) => r.topic_id} empty={<EmptyState compact title="موردی ثبت نشده" />} />
+            </Section>
+          </>
+        )}
+      </div>
+    </AppShell>
   );
 }

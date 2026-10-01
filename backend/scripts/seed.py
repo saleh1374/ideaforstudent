@@ -112,6 +112,7 @@ async def seed(db: AsyncSession) -> None:
         ("manage_permissions", "مدیریت دسترسی‌ها"),
         ("view_district_analytics", "مشاهده تحلیل ناحیه"),
         ("create_exam", "ایجاد آزمون"),
+        ("manage_deputies", "مدیریت معاونان مدرسه"),  # RBAC spec §6
     ]
     perm_objs = {}
     for key, title in perm_defs:
@@ -131,6 +132,23 @@ async def seed(db: AsyncSession) -> None:
         db.add(RolePermission(role_id=role_district.id, permission_id=p.id))
     await db.flush()
 
+    # ---------- مجوزهای سطح ناحیه (پنل مدیر ناحیه — district spec §1, §34) ----------
+    district_perm_defs = [
+        ("manage_schools", "مدیریت مدارس ناحیه"),
+        ("manage_principals", "انتصاب مدیر مدرسه"),
+        ("manage_district_staff", "مدیریت کارکنان ناحیه"),
+        ("manage_employment_policy", "ویرایش سیاست استخدام"),
+    ]
+    district_perms = {}
+    for key, title in district_perm_defs:
+        p = Permission(key=key, title_fa=title)
+        db.add(p)
+        district_perms[key] = p
+    await db.flush()
+    for p in district_perms.values():
+        db.add(RolePermission(role_id=role_district.id, permission_id=p.id))
+    await db.flush()
+
     # ---------- مجوزهای استان/وزارت (جدا از سطح مدرسه/ناحیه) ----------
     perm_province = Permission(key="view_province_analytics", title_fa="مشاهده تحلیل استان")
     perm_national = Permission(key="view_national_analytics", title_fa="مشاهده تحلیل کشور")
@@ -139,10 +157,13 @@ async def seed(db: AsyncSession) -> None:
     role_ministry = Role(key="ministry", title_fa="وزارت")
     db.add_all([role_province, role_ministry])
     await db.flush()
-    # استان: تحلیل استان + کشور (رقابت سالم بین استان‌ها)؛ وزارت: هر دو
+    # استان: تحلیل استان (حوزه استان) + تحلیل کشور (حوزه کشور — رقابت سالم بین
+    # استان‌ها) + مجوزهای ناحیه‌ای برای تفویض در حوزه استان؛ وزارت: هر دو کشوری
     for p in (perm_province, perm_national):
         db.add(RolePermission(role_id=role_province.id, permission_id=p.id))
         db.add(RolePermission(role_id=role_ministry.id, permission_id=p.id))
+    for p in district_perms.values():
+        db.add(RolePermission(role_id=role_province.id, permission_id=p.id))
     await db.flush()
 
     from app.models.org import Employee, Employment, SchoolAssignment
@@ -157,7 +178,8 @@ async def seed(db: AsyncSession) -> None:
     db.add_all(
         [
             Employment(employee_id=emp_admin.id, employment_type="official", organization="government", start_date=date.today()),
-            Employment(employee_id=emp_district.id, employment_type="official", organization="government", start_date=date.today()),
+            # مدیر ناحیه عضو هیئت علمی ناحیه است (district spec §12 — کارکنان ناحیه)
+            Employment(employee_id=emp_district.id, employment_type="official", organization="district", district_id=dist.id, start_date=date.today()),
             Employment(employee_id=emp_teacher.id, employment_type="contractual", organization="school", start_date=date.today()),
             Employment(employee_id=emp_teacher2.id, employment_type="official", organization="government", start_date=date.today()),
         ]
@@ -183,8 +205,25 @@ async def seed(db: AsyncSession) -> None:
                 )
             )
 
+    # مدیر ناحیه: مجوزهای ناحیه‌ای در حوزه ناحیه خودش
+    for p in district_perms.values():
+        db.add(
+            PermissionAssignment(
+                user_id=district_admin.id,
+                role_id=role_district.id,
+                permission_id=p.id,
+                scope_type="district",
+                scope_id=dist.id,
+                is_active=True,
+            )
+        )
+
     for user, role, perms, scope_type, scope_id in [
-        (province_admin, role_province, (perm_province, perm_national), "province", prov.id),
+        # استان: تحلیل استان در حوزه استان، تحلیل کشور در حوزه کشور (کلید
+        # view_national_analytics حوزه national می‌خواهد — /geo/national/*)
+        (province_admin, role_province, (perm_province,), "province", prov.id),
+        (province_admin, role_province, (perm_national,), "national", 0),
+        (province_admin, role_province, tuple(district_perms.values()), "province", prov.id),
         (ministry_user, role_ministry, (perm_province, perm_national), "national", 0),
     ]:
         for p in perms:
@@ -198,6 +237,14 @@ async def seed(db: AsyncSession) -> None:
                     is_active=True,
                 )
             )
+
+    # ---------- نقش «معاون» برای تفویض چک‌لیست معاونان (RBAC spec §6) ----------
+    role_deputy = Role(key="deputy", title_fa="معاون مدرسه")
+    db.add(role_deputy)
+    await db.flush()
+    for p in [*perm_objs.values(), *district_perms.values(), perm_province, perm_national]:
+        db.add(RolePermission(role_id=role_deputy.id, permission_id=p.id))
+    await db.flush()
 
     # ---------- employment policy ----------
     db.add_all(

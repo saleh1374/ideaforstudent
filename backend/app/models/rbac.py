@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -69,6 +70,22 @@ class PermissionAssignment(Base):
     valid_until: Mapped[Date | None] = mapped_column(Date)  # auto-expiring grants (spec §9)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+
+
+class Deputy(Base):
+    """معاون مدرسه (RBAC spec §6): به جای انواع ثابت معاون، یک ردیف با
+    چک‌لیست مجوز پویا که مدیر مدرسه هر زمان می‌تواند ویرایش کند."""
+
+    __tablename__ = "deputies"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    school_id: Mapped[int] = mapped_column(ForeignKey("schools.id"))
+    title_fa: Mapped[str] = mapped_column(String(100))  # «معاون آموزشی»، «معاون اجرایی»
+    permission_keys: Mapped[list] = mapped_column(JSON)  # چک‌لیست مجوزها (باید در Permission موجود باشند)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+
+    school = relationship("School")
 
 
 class AuditLog(Base):

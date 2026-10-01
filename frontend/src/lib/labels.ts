@@ -14,6 +14,39 @@ export const STATUS_COLOR: Record<string, string> = {
   unknown: "bg-slate-100 text-slate-500",
 };
 
+export const SUBJECT_FA: Record<string, string> = {
+  math: "ریاضی",
+  physics: "فیزیک",
+  chemistry: "شیمی",
+  arabic: "عربی",
+  persian: "فارسی",
+  english: "انگلیسی",
+  biology: "زیست",
+  geology: "زمین‌شناسی",
+  history: "تاریخ",
+  geography: "جغرافیا",
+  religion: "دین و زندگی",
+  physics1: "فیزیک (تجربی)",
+};
+
+/** پایهٔ تحصیلی: grade_10 → «پایهٔ دهم» */
+export const GRADE_FA: Record<string, string> = {
+  grade_7: "پایهٔ هفتم",
+  grade_8: "پایهٔ هشتم",
+  grade_9: "پایهٔ نهم",
+  grade_10: "پایهٔ دهم",
+  grade_11: "پایهٔ یازدهم",
+  grade_12: "پایهٔ دوازدهم",
+};
+
+/** برگرداندن برچسب فارسی عنوان درس (در صورت نبود، همان مقدار اولیه). */
+export const subjectFa = (value?: string | null): string =>
+  (value && (SUBJECT_FA[value] || value)) || "—";
+
+/** برگرداندن برچسب فارسی پایهٔ تحصیلی. */
+export const gradeFa = (value?: string | null): string =>
+  (value && (GRADE_FA[value] || value)) || "—";
+
 export const CAUSE_FA: Record<string, string> = {
   conceptual: "ضعف مفهومی",
   prerequisite: "ضعف پیش‌نیاز",

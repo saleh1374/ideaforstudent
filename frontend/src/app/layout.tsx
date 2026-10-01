@@ -1,5 +1,13 @@
 import type { Metadata } from "next";
+import { Vazirmatn } from "next/font/google";
 import "./globals.css";
+
+const vazirmatn = Vazirmatn({
+  subsets: ["arabic", "latin"],
+  variable: "--font-vazirmatn",
+  display: "swap",
+  weight: "variable",
+});
 
 export const metadata: Metadata = {
   title: "دانشیار — پلتفرم آموزشی تحلیلی",
@@ -9,13 +17,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="fa" dir="rtl">
-      <head>
-        <link
-          href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css"
-          rel="stylesheet"
-        />
-      </head>
-      <body>{children}</body>
+      <body className={`${vazirmatn.variable} font-sans`}>{children}</body>
     </html>
   );
 }

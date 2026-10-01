@@ -106,6 +106,32 @@ async def _activate(db: AsyncSession, *, req: EmploymentRequest, start_date: dat
         status="active",
     )
     db.add(assign)
+    await db.flush()
+    await log_action(
+        db,
+        actor_user_id=req.decided_by or req.requested_by,
+        action="school_assignment_created",
+        entity_type="school_assignment",
+        entity_id=assign.id,
+        detail=f"school={req.school_id} role={req.role} employee={emp.id}",
+    )
+
+
+async def is_principal_of(db: AsyncSession, user_id: int, school_id: int) -> bool:
+    """آیا کاربر مدیر (principal) فعالِ این مدرسه است؟ (district spec §15 —
+    فقط مدیر مدرسه می‌تواند درخواست استخدام ثبت کند.)"""
+    q = (
+        select(SchoolAssignment.id)
+        .join(Employee, Employee.id == SchoolAssignment.employee_id)
+        .where(
+            Employee.user_id == user_id,
+            SchoolAssignment.school_id == school_id,
+            SchoolAssignment.role == "principal",
+            SchoolAssignment.status == "active",
+        )
+        .limit(1)
+    )
+    return (await db.execute(q)).first() is not None
 
 
 async def decide_request(

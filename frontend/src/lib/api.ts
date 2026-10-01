@@ -95,5 +95,12 @@ export async function login(username: string, password: string) {
     { method: "POST", json: { username, password } }
   );
   setToken(data.token);
+  // cached for instant, role-aware navigation (cleared on logout)
+  try {
+    localStorage.setItem("daneshyar_role", data.user.role);
+    localStorage.setItem("daneshyar_name", data.user.full_name);
+  } catch {
+    /* storage unavailable */
+  }
   return data;
 }

@@ -2,7 +2,19 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, getToken } from "@/lib/api";
-import { STATUS_FA, STATUS_COLOR, STATUS_ORDER, fa } from "@/lib/labels";
+import { STATUS_FA, STATUS_ORDER, fa } from "@/lib/labels";
+import { AppShell } from "@/components/ui/shell";
+import { PageHeader } from "@/components/ui/page-header";
+import { Card, CardHeader } from "@/components/ui/card";
+import { StatCard } from "@/components/ui/stat";
+import { Alert } from "@/components/ui/alert";
+import { Badge, statusTone } from "@/components/ui/badge";
+import { EmptyState } from "@/components/ui/empty";
+import { Tabs } from "@/components/ui/tabs";
+import { ProgressBar } from "@/components/ui/progress";
+import { DonutChart, RadialProgress } from "@/components/ui/charts";
+import { SkeletonCard, SkeletonStats } from "@/components/ui/skeleton";
+import { IconAlert, IconFamily, IconTarget, IconTrend } from "@/components/ui/icons";
 
 type Child = { id: number; full_name: string; grade: string | null; class_id: number | null };
 
@@ -19,11 +31,20 @@ type Overview = {
   note_fa: string;
 };
 
+const STATUS_SEG_COLOR: Record<string, string> = {
+  mastered: "#10b981",
+  consolidating: "#0ea5e9",
+  weak: "#f59e0b",
+  critical: "#f43f5e",
+  unknown: "#cbd5e1",
+};
+
 export default function ParentPage() {
   const [children, setChildren] = useState<Child[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [ov, setOv] = useState<Overview | null>(null);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
 
   const loadChildren = useCallback(async () => {
     if (!getToken()) {
@@ -36,6 +57,8 @@ export default function ParentPage() {
       if (d.children.length > 0 && selected === null) setSelected(d.children[0].id);
     } catch (e) {
       setError(e instanceof Error ? e.message : "خطا");
+    } finally {
+      setLoading(false);
     }
   }, [selected]);
 
@@ -51,103 +74,155 @@ export default function ParentPage() {
       .catch((e) => setError(e.message));
   }, [selected]);
 
-  if (error) return <main className="p-6 text-red-600">{error}</main>;
+  const current = children.find((c) => c.id === selected);
 
   return (
-    <main className="max-w-4xl mx-auto p-6 space-y-6">
-      <header className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">پنل والدین</h1>
-        <button
-          className="btn-ghost text-xs"
-          onClick={() => {
-            localStorage.removeItem("daneshyar_token");
-            window.location.href = "/login";
-          }}
-        >
-          خروج
-        </button>
-      </header>
+    <AppShell>
+      <div className="space-y-6">
+        <PageHeader
+          title="پنل والدین"
+          description="وضعیت یادگیری فرزندتان را بدون نمره‌محوری ببینید: پیشرفت برنامه، تسط واقعی و مباحث نیازمند توجه."
+          crumbs={[{ label: "دانشیار" }, { label: "عمومی" }, { label: "پنل والدین" }]}
+          badge={current ? <Badge tone="primary" dot>{current.full_name}</Badge> : undefined}
+        />
 
-      {/* انتخاب فرزند */}
-      <section className="flex flex-wrap gap-2">
-        {children.length === 0 && (
-          <div className="card text-sm text-slate-400">فرزندی به حساب شما متصل نیست.</div>
+        {error && <Alert variant="danger" title="خطا">{error}</Alert>}
+
+        {/* child switcher */}
+        {loading && children.length === 0 && !error && <SkeletonStats count={3} />}
+
+        {!loading && children.length === 0 && !error && (
+          <EmptyState
+            icon={<IconFamily size={26} />}
+            title="فرزندی به حساب شما متصل نیست"
+            description="برای اتصال فرزند، با مدیر مدرسه هماهنگ کنید تا حساب شما لینک شود."
+          />
         )}
-        {children.map((c) => (
-          <button
-            key={c.id}
-            className={`btn text-sm ${selected === c.id ? "bg-primary-600 text-white" : "border border-slate-300 hover:bg-slate-50"}`}
-            onClick={() => setSelected(c.id)}
-          >
-            {c.full_name}
-          </button>
-        ))}
-      </section>
 
-      {ov && (
-        <>
-          {/* دو شاخص جدا: پیشرفت برنامه ≠ تسلط واقعی */}
-          <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div className="card text-center">
-              <p className="text-sm text-slate-500">پیشرفت در برنامه</p>
-              <p className="text-3xl font-bold text-primary-600 mt-2">{fa(ov.progress_pct, 1)}٪</p>
-            </div>
-            <div className="card text-center">
-              <p className="text-sm text-slate-500">تسلط واقعی</p>
-              <p className="text-3xl font-bold text-emerald-600 mt-2">{fa(ov.mastery_pct, 1)}٪</p>
-            </div>
-            <div className="card text-center">
-              <p className="text-sm text-slate-500">خطاهای باز</p>
-              <p className="text-3xl font-bold text-red-600 mt-2">
-                {fa(ov.errors_open)} <span className="text-base text-slate-400">از {fa(ov.errors_total)}</span>
-              </p>
-            </div>
-          </section>
+        {children.length > 0 && (
+          <Tabs
+            items={children.map((c) => ({ key: String(c.id), label: c.full_name }))}
+            value={String(selected ?? "")}
+            onChange={(k) => setSelected(Number(k))}
+          />
+        )}
 
-          {ov.gap_message && (
-            <div className="card border-amber-300 bg-amber-50 text-sm text-amber-800">
-              {Math.abs(ov.gap) >= 15 && (
-                <>
-                  شکاف {fa(Math.abs(ov.gap), 1)} واحدی بین پیشرفت و تسلط —{" "}
-                </>
-              )}
-              {ov.gap_message}
+        {!ov && selected !== null && (
+          <div className="space-y-5">
+            <SkeletonStats count={3} />
+            <div className="grid gap-5 lg:grid-cols-2">
+              <SkeletonCard />
+              <SkeletonCard />
             </div>
-          )}
+          </div>
+        )}
 
-          <section className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="card">
-              <h2 className="font-semibold mb-3">وضعیت مباحث</h2>
-              <div className="space-y-2">
-                {STATUS_ORDER.map((s) => (
-                  <div key={s} className="flex items-center justify-between text-sm">
-                    <span className={`badge ${STATUS_COLOR[s]}`}>{STATUS_FA[s]}</span>
-                    <span className="font-medium">{fa(ov.status_counts[s] ?? 0)} مبحث</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+        {ov && (
+          <>
+            {/* KPIs */}
+            <section className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <StatCard
+                label="پیشرفت در برنامه"
+                value={`${fa(ov.progress_pct, 1)}٪`}
+                tone="primary"
+                icon={<IconTrend size={20} />}
+                hint="از کل برنامه سال"
+              />
+              <StatCard
+                label="تسط واقعی"
+                value={`${fa(ov.mastery_pct, 1)}٪`}
+                tone="success"
+                icon={<IconTarget size={20} />}
+                hint="یادگیری تثبیت‌شده"
+              />
+              <StatCard
+                label="خطاهای باز"
+                value={
+                  <span>
+                    {fa(ov.errors_open)} <span className="text-base font-bold text-ink-faint">از {fa(ov.errors_total)}</span>
+                  </span>
+                }
+                tone={ov.errors_open > 0 ? "danger" : "success"}
+                icon={<IconAlert size={20} />}
+                hint={ov.errors_open > 0 ? "نیازمند مرور و ترمیم" : "همه رفع شده"}
+              />
+            </section>
 
-            <div className="card">
-              <h2 className="font-semibold mb-3">مباحث نیازمند توجه</h2>
-              {ov.weak_topics.length === 0 ? (
-                <p className="text-sm text-slate-400">مبحث ضعیفی دیده نمی‌شود.</p>
-              ) : (
-                <ul className="space-y-2 text-sm">
-                  {ov.weak_topics.map((t) => (
-                    <li key={t.topic_id} className="flex items-center justify-between">
-                      <span>{t.title}</span>
-                      <span className={`badge ${STATUS_COLOR[t.status]}`}>{STATUS_FA[t.status]}</span>
+            {(ov.gap_message || Math.abs(ov.gap) >= 15) && (
+              <Alert variant="warning" title="نکته مهم">
+                {Math.abs(ov.gap) >= 15 && <>شکاف {fa(Math.abs(ov.gap), 1)} واحدی بین پیشرفت و تسط — </>}
+                {ov.gap_message}
+              </Alert>
+            )}
+
+            <section className="grid gap-5 lg:grid-cols-3">
+              <Card>
+                <CardHeader title="وضعیت مباحث" subtitle="توزیع مباحث بر اساس تسط" icon={<IconTarget size={17} />} />
+                <DonutChart
+                  data={STATUS_ORDER.map((s) => ({
+                    label: STATUS_FA[s],
+                    value: ov.status_counts[s] ?? 0,
+                    color: STATUS_SEG_COLOR[s],
+                  }))}
+                  size={140}
+                  thickness={20}
+                  legend={false}
+                  centerSubtitle="مبحث"
+                />
+                <ul className="mt-4 space-y-2">
+                  {STATUS_ORDER.map((s) => (
+                    <li key={s} className="flex items-center justify-between text-xs">
+                      <Badge tone={statusTone(s)}>{STATUS_FA[s]}</Badge>
+                      <span className="num font-bold text-ink">{fa(ov.status_counts[s] ?? 0)} مبحث</span>
                     </li>
                   ))}
                 </ul>
-              )}
-            </div>
-          </section>
+              </Card>
 
-          <p className="text-xs text-slate-400">{ov.note_fa}</p>
-        </>
-      )}
-    </main>
+              <Card>
+                <CardHeader title="مباحث نیازمند توجه" subtitle="اولویت مرور در خانه" icon={<IconAlert size={17} />} />
+                {ov.weak_topics.length === 0 ? (
+                  <EmptyState compact icon={<IconTarget size={24} />} title="مبحث ضعیفی دیده نمی‌شود" description="وضعیت یادگیری پایدار است." />
+                ) : (
+                  <ul className="space-y-2">
+                    {ov.weak_topics.map((t) => (
+                      <li key={t.topic_id} className="flex items-center justify-between gap-3 rounded-xl bg-surface-sunken px-3.5 py-2.5">
+                        <span className="truncate text-xs font-semibold text-ink">{t.title}</span>
+                        <Badge tone={statusTone(t.status)}>{STATUS_FA[t.status] ?? t.status}</Badge>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </Card>
+
+              <Card>
+                <CardHeader title="جمع‌بندی وضعیت" icon={<IconTrend size={17} />} />
+                <div className="grid place-items-center py-2">
+                  <RadialProgress
+                    value={ov.mastery_pct}
+                    label="تسط واقعی"
+                    color="#039855"
+                    format={(v) => `${fa(v, 1)}٪`}
+                  />
+                </div>
+                <div className="mt-3 space-y-2">
+                  <ProgressBar value={ov.progress_pct} label="پیشرفت برنامه" showValue />
+                  <ProgressBar
+                    value={
+                      ov.errors_total > 0 ? ((ov.errors_total - ov.errors_open) / ov.errors_total) * 100 : 100
+                    }
+                    tone={ov.errors_open === 0 ? "success" : "warning"}
+                    label="رفع خطاها"
+                    showValue
+                  />
+                </div>
+              </Card>
+            </section>
+
+            {ov.note_fa && <Alert variant="info" title="جمع‌بندی سامانه">{ov.note_fa}</Alert>}
+          </>
+        )}
+      </div>
+    </AppShell>
   );
 }

@@ -1,8 +1,21 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, getToken, ErrorOut } from "@/lib/api";
 import { CAUSE_FA, fa } from "@/lib/labels";
+import { AppShell } from "@/components/ui/shell";
+import { PageHeader } from "@/components/ui/page-header";
+import { Card, CardHeader } from "@/components/ui/card";
+import { StatCard } from "@/components/ui/stat";
+import { Alert } from "@/components/ui/alert";
+import { Badge, statusTone } from "@/components/ui/badge";
+import { Button, ButtonLink } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty";
+import { Select } from "@/components/ui/forms";
+import { HorizontalBars } from "@/components/ui/charts";
+import { SkeletonCard } from "@/components/ui/skeleton";
+import { toast } from "@/components/ui/toast";
+import { IconAlert, IconCheckCircle, IconClock, IconHome, IconRefresh, IconTarget } from "@/components/ui/icons";
 
 const STATUS_FA: Record<string, string> = {
   open: "باز",
@@ -10,6 +23,14 @@ const STATUS_FA: Record<string, string> = {
   resolved: "رفع‌شده",
   relapsed: "بازگشته",
 };
+
+const STATUS_FILTERS: { key: string; label: string }[] = [
+  { key: "all", label: "همه" },
+  { key: "open", label: "باز" },
+  { key: "in_remediation", label: "در حال ترمیم" },
+  { key: "resolved", label: "رفع‌شده" },
+  { key: "relapsed", label: "بازگشته" },
+];
 
 type RetestPlan = {
   targets: { topic_id: number; title: string; causes: Record<string, number>; error_ids: number[] }[];
@@ -20,11 +41,12 @@ type RetestPlan = {
 export default function ErrorNotebookPage() {
   const [errors, setErrors] = useState<ErrorOut[]>([]);
   const [byCause, setByCause] = useState<Record<string, number>>({});
-  const [filter, setFilter] = useState<string>("all");
+  const [causeFilter, setCauseFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
   const [plan, setPlan] = useState<RetestPlan | null>(null);
   const [building, setBuilding] = useState(false);
-  const [msg, setMsg] = useState("");
 
   async function loadPlan() {
     try {
@@ -36,15 +58,13 @@ export default function ErrorNotebookPage() {
 
   async function buildRetest() {
     setBuilding(true);
-    setMsg("");
     try {
       const out = await api<{ exam_id: number }>("/student/retest/build", { method: "POST" });
-      setMsg(`✓ بازآزمون ترمیمی ساخته شد — از بخش آزمون‌ها ادامه دهید.`);
+      toast("بازآزمون ترمیمی ساخته شد", "success");
       await loadPlan();
-      // هدایت به آزمون ساخته‌شده
       window.location.href = `/student/exams/${out.exam_id}`;
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : "خطا");
+      toast(e instanceof Error ? e.message : "خطا در ساخت بازآزمون", "error");
       setBuilding(false);
     }
   }
@@ -59,80 +79,185 @@ export default function ErrorNotebookPage() {
         setErrors(d.errors);
         setByCause(d.by_cause);
       })
-      .catch((e) => setError(e.message));
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
     loadPlan();
   }, []);
 
-  if (error) return <main className="p-6 text-red-600">{error}</main>;
+  const stats = useMemo(() => {
+    const open = errors.filter((e) => e.status === "open").length;
+    const relapsed = errors.filter((e) => e.status === "relapsed").length;
+    const resolved = errors.filter((e) => e.status === "resolved").length;
+    return { total: errors.length, open, relapsed, resolved };
+  }, [errors]);
 
-  const visible = filter === "all" ? errors : errors.filter((e) => e.cause === filter);
+  const visible = useMemo(
+    () =>
+      errors.filter(
+        (e) => (causeFilter === "all" || e.cause === causeFilter) && (statusFilter === "all" || e.status === statusFilter)
+      ),
+    [errors, causeFilter, statusFilter]
+  );
+
+  const causeData = Object.entries(byCause).map(([c, n]) => ({ label: CAUSE_FA[c] ?? c, value: n }));
 
   return (
-    <main className="max-w-3xl mx-auto p-6 space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">دفترچه خطا</h1>
-        <a href="/student" className="btn-ghost text-xs">بازگشت</a>
-      </div>
+    <AppShell>
+      <div className="space-y-6">
+        <PageHeader
+          title="دفترچه خطا"
+          description="هر خطا یک سیگنال است؛ علت‌ها را ببین و با بازآزمون ترمیمی تثبیت کن."
+          crumbs={[{ label: "دانشیار" }, { label: "دانش‌آموز", href: "/student" }, { label: "دفترچه خطا" }]}
+          actions={
+            <ButtonLink href="/student" variant="ghost" size="sm" icon={<IconHome size={15} />}>
+              خانه
+            </ButtonLink>
+          }
+        />
 
-      {/* چرخه ترمیم/بازآزمون (فاز ۴) */}
-      {plan && plan.can_build && (
-        <div className="card space-y-3 border-primary-200 bg-primary-50">
-          <div>
-            <h2 className="font-semibold text-sm text-primary-800">بازآزمون ترمیمی پیشنهادی</h2>
-            <p className="text-xs text-primary-700 mt-1">{plan.note_fa}</p>
-          </div>
-          <ul className="text-sm space-y-1">
-            {plan.targets.map((t) => (
-              <li key={t.topic_id} className="flex items-center justify-between">
-                <span>{t.title}</span>
-                <span className="badge bg-white border border-primary-200 text-primary-700">
-                  {Object.entries(t.causes)
-                    .map(([c, n]) => `${CAUSE_FA[c] ?? c}: ${n}`)
-                    .join(" · ")}
+        {error && <Alert variant="danger" title="خطا در دریافت دفترچه">{error}</Alert>}
+
+        {!loading && !error && (
+          <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            <StatCard label="کل خطاها" value={fa(stats.total)} tone="primary" icon={<IconAlert size={20} />} />
+            <StatCard label="خطای باز" value={fa(stats.open)} tone="warning" icon={<IconClock size={20} />} hint="نیازمند کار" />
+            <StatCard label="در حال ترمیم" value={fa(stats.relapsed)} tone="danger" icon={<IconRefresh size={20} />} hint="بازگشته یا در جریان" />
+            <StatCard label="رفع‌شده" value={fa(stats.resolved)} tone="success" icon={<IconCheckCircle size={20} />} />
+          </section>
+        )}
+
+        {/* ——— retest plan ——— */}
+        {plan && plan.can_build && (
+          <Card variant="gradient" className="space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="flex items-start gap-3">
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-white/20 text-white">
+                  <IconTarget size={19} />
                 </span>
-              </li>
-            ))}
-          </ul>
-          <button className="btn-primary text-sm" onClick={buildRetest} disabled={building}>
-            {building ? "در حال ساخت…" : "ساخت و شروع بازآزمون"}
-          </button>
-          {msg && <p className="text-xs text-primary-700">{msg}</p>}
-        </div>
-      )}
+                <div>
+                  <h2 className="text-sm font-extrabold text-white">بازآزمون ترمیمی پیشنهادی</h2>
+                  <p className="mt-1 text-xs leading-6 text-white/75">{plan.note_fa}</p>
+                </div>
+              </div>
+              <Button size="sm" variant="ghost" className="border-white/30 bg-white/15 text-white hover:bg-white/25 hover:text-white" loading={building} onClick={buildRetest}>
+                ساخت و شروع بازآزمون
+              </Button>
+            </div>
+            <ul className="flex flex-wrap gap-2">
+              {plan.targets.map((t) => (
+                <li key={t.topic_id} className="rounded-xl bg-white/15 px-3 py-2 text-[11px] font-semibold text-white">
+                  {t.title}
+                  <span className="mr-2 font-normal text-white/70">
+                    {Object.entries(t.causes)
+                      .map(([c, n]) => `${CAUSE_FA[c] ?? c}: ${fa(n)}`)
+                      .join(" · ")}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </Card>
+        )}
 
-      {/* توزیع علت خطاها */}
-      <div className="card space-y-2">
-        <h2 className="text-sm font-semibold text-slate-600">توزیع علت خطاها</h2>
-        <div className="flex flex-wrap gap-2">
-          {Object.entries(byCause).map(([c, n]) => (
-            <button
-              key={c}
-              onClick={() => setFilter(filter === c ? "all" : c)}
-              className={`badge cursor-pointer ${
-                filter === c ? "bg-primary-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-              }`}
-            >
-              {CAUSE_FA[c] ?? c}: {fa(n)}
-            </button>
-          ))}
-          {Object.keys(byCause).length === 0 && <span className="text-xs text-slate-400">هنوز خطایی ثبت نشده.</span>}
+        {/* ——— cause distribution ——— */}
+        <div className="grid gap-5 lg:grid-cols-3">
+          <Card className="lg:col-span-1">
+            <CardHeader title="توزیع علت خطاها" subtitle="روی هر مورد بزن تا فیلتر شود" icon={<IconAlert size={17} />} />
+            {causeData.length === 0 ? (
+              <EmptyState compact title="هنوز خطایی ثبت نشده" description="با شروع آزمون‌ها، علت خطاها اینجا دسته‌بندی می‌شود." />
+            ) : (
+              <HorizontalBars data={causeData} showTotal />
+            )}
+          </Card>
+
+          <Card className="lg:col-span-2">
+            <CardHeader
+              title="لیست خطاها"
+              subtitle={`${fa(visible.length)} مورد`}
+              action={
+                <div className="flex flex-wrap items-center gap-2">
+                  <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-auto py-1.5 text-xs">
+                    {STATUS_FILTERS.map((s) => (
+                      <option key={s.key} value={s.key}>
+                        {s.label}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              }
+            />
+
+            {/* cause chips */}
+            <div className="mb-4 flex flex-wrap gap-2">
+              <button
+                onClick={() => setCauseFilter("all")}
+                className={`rounded-full px-3 py-1.5 text-[11px] font-semibold transition ${
+                  causeFilter === "all" ? "bg-primary-600 text-white shadow-soft" : "bg-slate-100 text-ink-muted hover:bg-primary-50 hover:text-primary-700"
+                }`}
+              >
+                همه علت‌ها
+              </button>
+              {Object.entries(byCause).map(([c, n]) => (
+                <button
+                  key={c}
+                  onClick={() => setCauseFilter(causeFilter === c ? "all" : c)}
+                  className={`num rounded-full px-3 py-1.5 text-[11px] font-semibold transition ${
+                    causeFilter === c ? "bg-primary-600 text-white shadow-soft" : "bg-slate-100 text-ink-muted hover:bg-primary-50 hover:text-primary-700"
+                  }`}
+                >
+                  {CAUSE_FA[c] ?? c} · {fa(n)}
+                </button>
+              ))}
+            </div>
+
+            {loading && <div className="space-y-3"><SkeletonCard /><SkeletonCard /></div>}
+
+            {!loading && visible.length === 0 && (
+              <EmptyState
+                compact
+                title="خطایی با این فیلترها نیست"
+                description="فیلترها را تغییر بده یا صبر کن تا آزمون‌های جدید ثبت شوند."
+                action={
+                  <Button size="sm" variant="soft" type="button" onClick={() => { setCauseFilter("all"); setStatusFilter("all"); }}>
+                    حذف فیلترها
+                  </Button>
+                }
+              />
+            )}
+
+            <div className="space-y-3">
+              {visible.map((e) => (
+                <div
+                  key={e.id}
+                  className={`rounded-2xl border p-4 transition ${
+                    e.status === "relapsed"
+                      ? "border-danger-100 bg-danger-50/50"
+                      : "border-line bg-surface hover:border-primary-200 hover:shadow-soft"
+                  }`}
+                >
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex items-center gap-2">
+                      <Badge tone={causeFilter === e.cause ? "primary" : "neutral"}>{CAUSE_FA[e.cause] ?? e.cause}</Badge>
+                      <Badge tone={statusTone(e.status)} dot>
+                        {STATUS_FA[e.status] ?? e.status}
+                      </Badge>
+                    </div>
+                    <span className="num text-[11px] text-ink-faint">مبحث #{e.topic_id}</span>
+                  </div>
+                  <p className="text-sm font-semibold leading-7 text-ink">{e.item?.body}</p>
+                  <div className="mt-2 flex flex-wrap items-center gap-4 text-[11px] text-ink-muted">
+                    <span>
+                      پاسخ درست: <b className="text-success-600">{e.item?.correct}</b>
+                    </span>
+                    {e.item?.options && e.item.options[e.item.correct] && (
+                      <span className="text-ink-faint">{e.item.options[e.item.correct]}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
         </div>
       </div>
-
-      {visible.map((e) => (
-        <div key={e.id} className={`card space-y-2 ${e.status === "relapsed" ? "border-red-300 bg-red-50" : ""}`}>
-          <div className="flex items-center justify-between text-xs">
-            <span className="badge bg-slate-100 text-slate-600">{CAUSE_FA[e.cause] ?? e.cause}</span>
-            <span className={e.status === "relapsed" ? "text-red-600 font-medium" : "text-slate-400"}>
-              {STATUS_FA[e.status] ?? e.status}
-            </span>
-          </div>
-          <p className="text-sm font-medium">{e.item?.body}</p>
-          <p className="text-xs text-slate-400">
-            پاسخ درست: <b>{e.item?.correct}</b>
-          </p>
-        </div>
-      ))}
-    </main>
+    </AppShell>
   );
 }

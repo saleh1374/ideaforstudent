@@ -6,30 +6,92 @@
   color-scheme: light;
 }
 
-body {
-  @apply bg-slate-50 text-slate-900 antialiased;
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-canvas text-ink antialiased;
+    font-feature-settings: "ss01";
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply tracking-tight;
+  }
+
+  ::selection {
+    @apply bg-primary-500/20 text-primary-900;
+  }
+
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50 focus-visible:ring-offset-1 focus-visible:ring-offset-canvas;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd2e4 transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-slate-300;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
 }
 
-.card {
-  @apply bg-white rounded-2xl shadow-sm border border-slate-200 p-5;
+@layer components {
+  /* Legacy helpers kept so any un-migrated markup stays on-system */
+  .card {
+    @apply rounded-2xl border border-line bg-surface p-5 shadow-soft;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition focus-visible:ring-2 focus-visible:ring-primary-500/50 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-brand-gradient text-white shadow-lift hover:brightness-110 active:scale-[.98];
+  }
+
+  .btn-ghost {
+    @apply btn border border-line bg-surface text-ink hover:border-primary-300 hover:bg-primary-50 hover:text-primary-700;
+  }
+
+  .input {
+    @apply w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 text-sm text-ink placeholder:text-ink-faint shadow-soft transition focus:border-primary-400 focus:ring-2 focus:ring-primary-500/20;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold;
+  }
 }
 
-.btn {
-  @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition;
-}
+@layer utilities {
+  /* Tabular figures for Persian numerals in dashboards/tables */
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
 
-.btn-primary {
-  @apply btn bg-primary-600 text-white hover:bg-primary-700 disabled:opacity-50;
-}
+  .skeleton {
+    @apply animate-shimmer rounded-lg;
+    background-image: linear-gradient(90deg, #e9edf6 25%, #f5f7fc 45%, #e9edf6 65%);
+    background-size: 200% 100%;
+  }
 
-.btn-ghost {
-  @apply btn border border-slate-300 hover:bg-slate-100;
-}
-
-.input {
-  @apply w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500;
-}
-
-.badge {
-  @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+  .surface-card {
+    @apply rounded-2xl border border-line bg-surface shadow-soft;
+  }
 }

@@ -2,7 +2,18 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, getToken } from "@/lib/api";
-import { STATUS_FA, STATUS_COLOR, fa } from "@/lib/labels";
+import { STATUS_FA, fa } from "@/lib/labels";
+import { AppShell } from "@/components/ui/shell";
+import { PageHeader } from "@/components/ui/page-header";
+import { Card, Section } from "@/components/ui/card";
+import { StatCard } from "@/components/ui/stat";
+import { Alert } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/ui/empty";
+import { Tabs } from "@/components/ui/tabs";
+import { DataTable, type Column } from "@/components/ui/table";
+import { SkeletonStats, SkeletonTable } from "@/components/ui/skeleton";
+import { IconChart, IconShield, IconUsers } from "@/components/ui/icons";
 
 type BoardRow = {
   key: string;
@@ -35,6 +46,7 @@ export default function BoardsPage() {
   const [tab, setTab] = useState<Tab>("school");
   const [board, setBoard] = useState<Board | null>(null);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
 
   const load = useCallback(async (t: Tab) => {
     if (!getToken()) {
@@ -42,12 +54,16 @@ export default function BoardsPage() {
       return;
     }
     setBoard(null);
+    setError("");
+    setLoading(true);
     try {
       // MVP: شناسه‌های نمونه (مدرسه ۱، استان ۱)
       const path = t === "school" ? "/boards/school/1" : t === "province" ? "/boards/province/1" : "/boards/national";
       setBoard(await api<Board>(path));
     } catch (e) {
       setError(e instanceof Error ? e.message : "خطا");
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -55,115 +71,144 @@ export default function BoardsPage() {
     load(tab);
   }, [tab, load]);
 
-  if (error) return <main className="p-6 text-red-600">{error}</main>;
+  const columns: Column<BoardRow>[] = [
+    { key: "key", header: "کد مستعار", render: (row) => <span className="font-semibold text-ink">{row.key}</span> },
+    {
+      key: "students",
+      header: "دانش‌آموز دارای داده",
+      align: "center",
+      render: (row) => <span className="num">{fa(row.students_with_data)}</span>,
+    },
+    {
+      key: "mastery",
+      header: "تسط",
+      align: "center",
+      render: (row) =>
+        row.suppressed ? (
+          <Badge tone="neutral">زیر حد نصاب</Badge>
+        ) : (
+          <span className="num font-bold text-ink">{row.avg_mastery !== null ? `${fa(row.avg_mastery)}٪` : "—"}</span>
+        ),
+    },
+    {
+      key: "retention",
+      header: "ماندگاری",
+      align: "center",
+      render: (row) => <span className="num">{row.suppressed || row.avg_retention === null ? "—" : `${fa(row.avg_retention * 100)}٪`}</span>,
+    },
+    {
+      key: "weak",
+      header: "ضعیف/بحرانی",
+      align: "center",
+      render: (row) => <span className="num font-semibold text-danger-600">{row.weak_count === null ? "—" : fa(row.weak_count)}</span>,
+    },
+    {
+      key: "status",
+      header: "وضعیت",
+      align: "center",
+      render: (row) =>
+        row.status_counts ? (
+          <span className="inline-flex flex-wrap justify-center gap-1">
+            {Object.entries(row.status_counts).map(([k, v]) => (
+              <span key={k} className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-ink-muted">
+                {STATUS_FA[k] ?? k}: {fa(v)}
+              </span>
+            ))}
+          </span>
+        ) : (
+          "—"
+        ),
+    },
+  ];
 
   return (
-    <main className="max-w-4xl mx-auto p-6 space-y-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold">بردهای تحلیلی</h1>
-          <p className="text-xs text-slate-400 mt-1">نام‌ها مستعار است و اعداد زیر حداقل جمعیت نمایش داده نمی‌شوند.</p>
-        </div>
-        <a href="/student" className="btn-ghost text-xs">
-          بازگشت
-        </a>
-      </header>
+    <AppShell>
+      <div className="space-y-6">
+        <PageHeader
+          title="بردهای تحلیلی"
+          description="نام‌ها مستعار است و اعداد زیر حداقل جمعیت نمایش داده نمی‌شوند — نه تخمین، نه رنگ."
+          crumbs={[{ label: "دانشیار" }, { label: "عمومی" }, { label: "بردها" }]}
+          badge={
+            <Badge tone="accent" dot>
+              حریم خصوصی فعال
+            </Badge>
+          }
+        />
 
-      <nav className="flex gap-2">
-        {(["school", "province", "national"] as Tab[]).map((t) => (
-          <button
-            key={t}
-            className={`btn text-sm ${tab === t ? "bg-primary-600 text-white" : "border border-slate-300 hover:bg-slate-50"}`}
-            onClick={() => setTab(t)}
-          >
-            {TAB_FA[t]}
-          </button>
-        ))}
-      </nav>
+        {error && <Alert variant="danger" title="خطا در دریافت برد">{error}</Alert>}
 
-      {board && (
-        <section className="space-y-3">
-          <div className="card border-slate-200 bg-slate-50 text-xs text-slate-600">{board.note_fa}</div>
+        <Tabs
+          items={(["school", "province", "national"] as Tab[]).map((t) => ({ key: t, label: TAB_FA[t] }))}
+          value={tab}
+          onChange={(k) => setTab(k as Tab)}
+        />
 
-          {board.total && (
-            <div className="card">
-              <h2 className="font-semibold mb-3">جمع کلی</h2>
-              <BoardAggregate row={board.total} />
-            </div>
-          )}
-
-          <div className="card overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-slate-400 text-xs border-b border-slate-100">
-                  <th className="text-right py-2">کد مستعار</th>
-                  <th className="py-2">دانش‌آموز دارای داده</th>
-                  <th className="py-2">تسلط</th>
-                  <th className="py-2">ماندگاری</th>
-                  <th className="py-2">ضعیف/بحرانی</th>
-                  <th className="py-2">وضعیت</th>
-                </tr>
-              </thead>
-              <tbody>
-                {board.rows.map((row) => (
-                  <tr key={row.key} className="border-b border-slate-50">
-                    <td className="py-2 text-right font-medium">{row.key}</td>
-                    <td className="py-2 text-center">{fa(row.students_with_data)}</td>
-                    <td className="py-2 text-center font-semibold">
-                      {row.suppressed ? <span className="text-slate-400">زیر حد نصاب</span> : `${fa(row.avg_mastery)}٪`}
-                    </td>
-                    <td className="py-2 text-center">
-                      {row.suppressed ? "—" : row.avg_retention !== null ? `${fa(row.avg_retention * 100)}٪` : "—"}
-                    </td>
-                    <td className="py-2 text-center">{row.weak_count === null ? "—" : fa(row.weak_count)}</td>
-                    <td className="py-2 text-center">
-                      {row.status_counts ? (
-                        <span className="badge bg-slate-100 text-slate-600">
-                          {Object.entries(row.status_counts)
-                            .map(([k, v]) => `${STATUS_FA[k] ?? k}: ${fa(v)}`)
-                            .join(" · ")}
-                        </span>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        {loading && (
+          <div className="space-y-5">
+            <SkeletonStats count={4} />
+            <SkeletonTable rows={5} cols={6} />
           </div>
+        )}
 
-          <p className="text-xs text-slate-400">
-            زیر حداقل جمعیت {fa(board.min_group)} نفر، عددی نمایش داده نمی‌شود — نه تخمین، نه رنگ (حریم خصوصی §8.2).
-          </p>
-        </section>
-      )}
-    </main>
+        {!loading && board && (
+          <Section className="animate-fade-in">
+            <Alert variant="info">{board.note_fa}</Alert>
+
+            {board.total && (
+              <Card>
+                <div className="mb-4 flex items-center gap-2">
+                  <span className="grid h-9 w-9 place-items-center rounded-xl bg-brand-gradient-soft text-primary-600">
+                    <IconChart size={17} />
+                  </span>
+                  <h2 className="text-sm font-bold text-ink">جمع کلی</h2>
+                </div>
+                <BoardAggregate row={board.total} />
+              </Card>
+            )}
+
+            <DataTable
+              columns={columns}
+              rows={board.rows}
+              keyOf={(r) => r.key}
+              empty={
+                <EmptyState
+                  icon={<IconUsers size={26} />}
+                  title="ردیفی برای نمایش نیست"
+                  description="در این محدوده، داده‌ای زیر حد نصاب جمعیت ثبت نشده است."
+                />
+              }
+            />
+
+            <p className="text-[11px] leading-6 text-ink-faint">
+              زیر حداقل جمعیت {fa(board.min_group)} نفر، عددی نمایش داده نمی‌شود — نه تخمین، نه رنگ (حریم خصوصی §8.2).
+            </p>
+          </Section>
+        )}
+
+        {!loading && !board && !error && (
+          <EmptyState icon={<IconShield size={26} />} title="داده‌ای در دسترس نیست" description="برای این محدوده، بردی بازگردانده نشد." />
+        )}
+      </div>
+    </AppShell>
   );
 }
 
 function BoardAggregate({ row }: { row: BoardRow }) {
   if (row.suppressed) {
-    return <p className="text-sm text-slate-400">با جمعیت فعلی ({fa(row.students_with_data)} نفر دارای داده) زیر حد نصاب است.</p>;
+    return (
+      <div className="rounded-2xl border border-dashed border-line bg-surface-sunken p-6 text-center">
+        <p className="text-xs leading-6 text-ink-muted">
+          با جمعیت فعلی ({fa(row.students_with_data)} نفر دارای داده) زیر حد نصاب است.
+        </p>
+      </div>
+    );
   }
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center text-sm">
-      <div>
-        <p className="text-xs text-slate-500">دانش‌آموز</p>
-        <p className="font-bold">{fa(row.students_with_data)}</p>
-      </div>
-      <div>
-        <p className="text-xs text-slate-500">تسلط</p>
-        <p className="font-bold text-emerald-600">{fa(row.avg_mastery)}٪</p>
-      </div>
-      <div>
-        <p className="text-xs text-slate-500">ماندگاری</p>
-        <p className="font-bold">{row.avg_retention !== null ? `${fa(row.avg_retention * 100)}٪` : "—"}</p>
-      </div>
-      <div>
-        <p className="text-xs text-slate-500">ضعیف/بحرانی</p>
-        <p className="font-bold text-red-600">{row.weak_count === null ? "—" : fa(row.weak_count)}</p>
-      </div>
+    <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <StatCard label="دانش‌آموز" value={fa(row.students_with_data)} tone="primary" icon={<IconUsers size={20} />} />
+      <StatCard label="تسط" value={row.avg_mastery !== null ? `${fa(row.avg_mastery)}٪` : "—"} tone="success" icon={<IconChart size={20} />} />
+      <StatCard label="ماندگاری" value={row.avg_retention !== null ? `${fa(row.avg_retention * 100)}٪` : "—"} tone="accent" icon={<IconChart size={20} />} />
+      <StatCard label="ضعیف/بحرانی" value={row.weak_count === null ? "—" : fa(row.weak_count)} tone="danger" icon={<IconShield size={20} />} />
     </div>
   );
 }
