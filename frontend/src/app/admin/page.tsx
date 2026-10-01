@@ -8,10 +8,9 @@ import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardHeader, Section } from "@/components/ui/card";
 import { StatCard } from "@/components/ui/stat";
 import { Alert } from "@/components/ui/alert";
-import { Badge, statusTone } from "@/components/ui/badge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty";
-import { Field, Input, Select } from "@/components/ui/forms";
 import { Modal } from "@/components/ui/modal";
 import { Tabs } from "@/components/ui/tabs";
 import { DataTable, type Column } from "@/components/ui/table";
@@ -23,14 +22,13 @@ import {
   IconChart,
   IconCheckCircle,
   IconLayers,
-  IconPlus,
   IconRefresh,
-  IconSchool,
   IconShield,
   IconTarget,
   IconUsers,
-  IconX,
 } from "@/components/ui/icons";
+import { EmploymentSection } from "./employment-section";
+import { AdmissionsSection } from "./admissions-section";
 
 type Overview = {
   school: { id: number; name: string; type: string; ownership: string };
@@ -96,30 +94,6 @@ type Diagnosis = {
   note_fa: string;
 };
 
-type Request = {
-  id: number;
-  school_id: number;
-  full_name: string;
-  employment_type: string;
-  organization: string;
-  subject: string | null;
-  status: string;
-};
-
-const REQ_STATUS_FA: Record<string, string> = {
-  pending: "در انتظار تأیید ناحیه",
-  approved: "تأییدشده",
-  rejected: "ردشده",
-  auto_approved: "تأیید خودکار (سیاست)",
-};
-
-const EMPLOYMENT_FA: Record<string, string> = {
-  official: "رسمی",
-  contractual: "قراردادی",
-  part_time: "پاره‌وقت",
-  temporary: "موقت",
-};
-
 const FLAG_STYLE: Record<string, string> = {
   low_mastery_majority: "bg-danger-50 text-danger-600",
   high_repeats: "bg-warning-50 text-warning-600",
@@ -127,7 +101,7 @@ const FLAG_STYLE: Record<string, string> = {
   low_platform_usage: "bg-slate-100 text-ink-muted",
 };
 
-type Tab = "compare" | "flags" | "teachers";
+type Tab = "compare" | "flags" | "teachers" | "admissions";
 
 export default function AdminPage() {
   const [tab, setTab] = useState<Tab>("compare");
@@ -136,12 +110,9 @@ export default function AdminPage() {
   const [flags, setFlags] = useState<Flag[]>([]);
   const [profiles, setProfiles] = useState<TeacherProfile[]>([]);
   const [diagnosis, setDiagnosis] = useState<Diagnosis | null>(null);
-  const [requests, setRequests] = useState<Request[]>([]);
   const [error, setError] = useState("");
   const [role, setRole] = useState("");
   const [loading, setLoading] = useState(true);
-  const [form, setForm] = useState({ employee_user_id: 7, full_name: "", employment_type: "contractual", subject: "math" });
-  const [submitting, setSubmitting] = useState(false);
 
   // تأیید/رد استخدام فقط سطح ناحیه و بالاتر (بک‌اند scope ناحیه را چک می‌کند)
   const canDecide = role === "district_admin" || role === "province_admin" || role === "platform_admin";
@@ -160,13 +131,11 @@ export default function AdminPage() {
         api<CompareData>("/admin/school/1/classes-compare/math"),
         api<{ flags: Flag[] }>("/admin/school/1/attention-flags"),
         api<{ profiles: TeacherProfile[] }>("/admin/school/1/teachers"),
-        api<{ requests: Request[] }>("/admin/employment-requests"),
       ]);
       if (parts[0].status === "fulfilled") setOv(parts[0].value);
       if (parts[1].status === "fulfilled") setCmp(parts[1].value);
       if (parts[2].status === "fulfilled") setFlags(parts[2].value.flags);
       if (parts[3].status === "fulfilled") setProfiles(parts[3].value.profiles);
-      if (parts[4].status === "fulfilled") setRequests(parts[4].value.requests);
       const failed = parts.filter((p) => p.status === "rejected") as PromiseRejectedResult[];
       if (failed.length === parts.length) {
         setError(failed[0]?.reason instanceof Error ? failed[0].reason.message : "خطا");
@@ -190,36 +159,6 @@ export default function AdminPage() {
       setDiagnosis(await api<Diagnosis>(`/admin/classes/${classId}/diagnosis`));
     } catch (e) {
       toast(e instanceof Error ? e.message : "خطا در تشخیص", "error");
-    }
-  }
-
-  async function addTeacher(e: React.FormEvent) {
-    e.preventDefault();
-    setSubmitting(true);
-    try {
-      const res = await api<{ status: string }>("/admin/employment-requests", { method: "POST", json: form });
-      toast(
-        res.status === "auto_approved"
-          ? "طبق سیاست استخدام، تأیید ناحیه لازم نبود — معلم فعال شد."
-          : "درخواست ثبت شد و برای تأیید به ناحیه ارسال شد.",
-        "success"
-      );
-      setForm({ ...form, full_name: "" });
-      await loadAll();
-    } catch (e) {
-      toast(e instanceof Error ? e.message : "خطا در ثبت درخواست", "error");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function decide(id: number, approve: boolean) {
-    try {
-      await api(`/admin/employment-requests/${id}/decide`, { method: "POST", json: { approve } });
-      toast(approve ? "درخواست تأیید شد." : "درخواست رد شد.", approve ? "success" : "info");
-      await loadAll();
-    } catch (e) {
-      toast(e instanceof Error ? e.message : "خطا", "error");
     }
   }
 
@@ -396,6 +335,7 @@ export default function AdminPage() {
                 { key: "compare", label: "مقایسه کلاس‌ها", count: cmp?.rows.length ?? 0 },
                 { key: "flags", label: "نیازمند بررسی", count: flags.length },
                 { key: "teachers", label: "نمایه معلمان", count: profiles.length },
+                { key: "admissions", label: "ثبت‌نام دانش‌آموزان" },
               ]}
               value={tab}
               onChange={(k) => setTab(k as Tab)}
@@ -466,6 +406,9 @@ export default function AdminPage() {
               </Section>
             )}
 
+            {/* ثبت‌نام دانش‌آموزان */}
+            {tab === "admissions" && <AdmissionsSection schoolId={ov?.school.id ?? null} />}
+
             {/* §6 تشخیص چندعاملی */}
             <Modal
               open={diagnosis !== null}
@@ -521,99 +464,11 @@ export default function AdminPage() {
                 </div>
               )}
             </Modal>
-
-            {/* افزودن معلم */}
-            <Card>
-              <CardHeader
-                title="افزودن معلم (درخواست + سیاست استخدام)"
-                subtitle="معلم رسمی در مدرسه دولتی → تأیید خودکار؛ قراردادی → نیاز به تأیید ناحیه."
-                icon={<IconPlus size={17} />}
-              />
-              <form onSubmit={addTeacher} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Field label="نام معلم" required>
-                  <Input
-                    placeholder="نام معلم"
-                    value={form.full_name}
-                    onChange={(e) => setForm({ ...form, full_name: e.target.value })}
-                    required
-                  />
-                </Field>
-                <Field label="شناسه کاربر معلم جدید" required>
-                  <Input
-                    placeholder="شناسه کاربر"
-                    type="number"
-                    value={form.employee_user_id}
-                    onChange={(e) => setForm({ ...form, employee_user_id: Number(e.target.value) })}
-                    required
-                  />
-                </Field>
-                <Field label="نوع استخدام">
-                  <Select value={form.employment_type} onChange={(e) => setForm({ ...form, employment_type: e.target.value })}>
-                    <option value="official">رسمی</option>
-                    <option value="contractual">قراردادی</option>
-                    <option value="part_time">پاره‌وقت</option>
-                    <option value="temporary">موقت</option>
-                  </Select>
-                </Field>
-                <Field label="درس">
-                  <Select value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })}>
-                    <option value="math">ریاضی</option>
-                    <option value="physics">فیزیک</option>
-                    <option value="chemistry">شیمی</option>
-                  </Select>
-                </Field>
-                <div className="sm:col-span-2">
-                  <Button type="submit" loading={submitting} className="w-full sm:w-auto" icon={<IconPlus size={15} />}>
-                    ثبت درخواست
-                  </Button>
-                </div>
-              </form>
-            </Card>
-
-            {/* کارتابل درخواست‌ها */}
-            <Section title="کارتابل درخواست‌های استخدام" subtitle="درخواست‌های در انتظار، برای تأیید ناحیه ارسال می‌شوند.">
-              {requests.length === 0 ? (
-                <EmptyState icon={<IconSchool size={26} />} title="درخواستی ثبت نشده" description="درخواست‌های جدید استخدام اینجا نمایش داده می‌شود." />
-              ) : (
-                <div className="space-y-3">
-                  {requests.map((r) => (
-                    <Card key={r.id} className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="flex items-center gap-3">
-                        <span className="grid h-9 w-9 place-items-center rounded-xl bg-brand-gradient-soft text-primary-600">
-                          <IconUsers size={17} />
-                        </span>
-                        <div>
-                          <p className="text-sm font-bold text-ink">{r.full_name}</p>
-                          <p className="num mt-0.5 text-[11px] text-ink-muted">
-                            {EMPLOYMENT_FA[r.employment_type] ?? r.employment_type} · {r.subject ?? "—"} · {r.organization}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Badge tone={statusTone(r.status)} dot>
-                          {REQ_STATUS_FA[r.status] ?? r.status}
-                        </Badge>
-                        {r.status === "pending" &&
-                          (canDecide ? (
-                            <>
-                              <Button size="sm" variant="success" onClick={() => decide(r.id, true)} icon={<IconCheckCircle size={14} />}>
-                                تأیید
-                              </Button>
-                              <Button size="sm" variant="ghost" onClick={() => decide(r.id, false)} icon={<IconX size={14} />}>
-                                رد
-                              </Button>
-                            </>
-                          ) : (
-                            <span className="text-[11px] text-ink-muted">در انتظار تصمیم ناحیه</span>
-                          ))}
-                      </div>
-                    </Card>
-                  ))}
-                </div>
-              )}
-            </Section>
           </>
         )}
+
+        {/* ——— استخدام معلم (ویزارد + کارتابل) ——— */}
+        <EmploymentSection canDecide={canDecide} onChanged={loadAll} />
       </div>
     </AppShell>
   );

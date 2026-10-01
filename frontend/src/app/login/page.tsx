@@ -1,8 +1,10 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useState } from "react";
 import { login } from "@/lib/api";
+import { homeFor } from "@/lib/roles";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/forms";
@@ -18,17 +20,6 @@ const DEMO_USERS = [
   { u: "ministry", label: "وزارت" },
   { u: "tutor1", label: "معلم خصوصی" },
 ];
-
-const HOME: Record<string, string> = {
-  student: "/student",
-  teacher: "/teacher",
-  parent: "/parent",
-  province_admin: "/geo",
-  ministry: "/geo",
-  school_admin: "/admin",
-  district_admin: "/admin",
-  platform_admin: "/admin",
-};
 
 const HIGHLIGHTS = [
   { icon: IconGraduation, text: "پنل دانش‌آموز با برنامه روزانه، دفترچه خطا و آزمون ترمیمی" },
@@ -49,7 +40,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const data = await login(username, password);
-      router.push(HOME[data.user.role] ?? "/admin");
+      router.push(homeFor(data.user.role));
     } catch (err) {
       setError(err instanceof Error ? err.message : "خطا در ورود");
       setLoading(false);
@@ -158,6 +149,16 @@ export default function LoginPage() {
               {loading ? "در حال ورود…" : "ورود به داشبورد"}
             </Button>
           </form>
+
+          {/* ثبت‌نام عمومی دانش‌آموز */}
+          <div className="mt-5 text-center">
+            <Link
+              href="/signup"
+              className="text-xs font-bold text-primary-600 transition hover:text-primary-700 hover:underline"
+            >
+              ثبت‌نام دانش‌آموز جدید
+            </Link>
+          </div>
 
           {/* demo accounts */}
           <div className="mt-7 rounded-2xl border border-dashed border-line bg-surface-sunken p-4">
