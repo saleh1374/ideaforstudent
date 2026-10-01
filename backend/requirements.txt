@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+sqlalchemy[asyncio]>=2.0
+aiosqlite
+pydantic>=2
+pydantic-settings
+httpx
+pytest
+asyncpg

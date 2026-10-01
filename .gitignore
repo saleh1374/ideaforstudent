@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.db
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# Env / IDE
+.env
+.env.local
+.idea/
+.vscode/
+.DS_Store
+
+# Extracted spec texts are generated
+specs-text/

@@ -1,0 +1,52 @@
+INFO:     Started server process [13144]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:58355 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49901 - "GET /auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49903 - "GET /auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49904 - "GET /admin/school/1/overview HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53223 - "GET /admin/employment-requests HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53222 - "GET /admin/school/1/overview HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58964 - "GET /admin/employment-requests HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60439 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59794 - "GET /teacher/me/classes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59795 - "GET /teacher/me/classes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59796 - "GET /teacher/classes/1/radar HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59798 - "GET /teacher/classes/1/radar HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59799 - "GET /teacher/classes/1/groups HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59801 - "GET /teacher/classes/1/groups HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61763 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61764 - "POST /student/exams/1/start HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61770 - "POST /student/exams/1/submit HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61771 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61772 - "GET /teacher/classes/1/root-cause/2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49320 - "GET /auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49321 - "GET /auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49322 - "GET /admin/school/1/overview HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49324 - "GET /admin/employment-requests HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49323 - "GET /admin/school/1/overview HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65068 - "GET /admin/employment-requests HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65090 - "GET /teacher/classes/1/radar HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65091 - "GET /teacher/classes/1/students HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62506 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62507 - "GET /teacher/me/classes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62508 - "GET /teacher/me/classes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62509 - "GET /teacher/classes/1/radar HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52150 - "GET /teacher/classes/1/radar HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52151 - "GET /teacher/classes/1/groups HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53359 - "GET /teacher/classes/1/groups HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61356 - "GET /teacher/classes/1/radar HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51361 - "GET /teacher/classes/1/groups HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54121 - "GET /teacher/classes/1/radar HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65100 - "GET /teacher/classes/1/groups HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64070 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64073 - "GET /student/home HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64074 - "GET /student/home HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61562 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61563 - "GET /auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61564 - "GET /auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61565 - "GET /admin/school/1/overview HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54252 - "GET /admin/employment-requests HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54251 - "GET /admin/school/1/overview HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53357 - "GET /admin/employment-requests HTTP/1.1" 200 OK
