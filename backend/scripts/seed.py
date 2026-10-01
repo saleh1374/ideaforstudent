@@ -113,6 +113,10 @@ async def seed(db: AsyncSession) -> None:
         ("view_district_analytics", "مشاهده تحلیل ناحیه"),
         ("create_exam", "ایجاد آزمون"),
         ("manage_deputies", "مدیریت معاونان مدرسه"),  # RBAC spec §6
+        # Feature B: پذیرش ثبت‌نام/افزودن مستقیم دانش‌آموز — فقط یک بار
+        # ساخته می‌شود (کلید Permission یکتاست) و حلقه‌های نقش مدرسه/ناحیه
+        # (و چک‌لیست معاون) خودشان آن را برمی‌دارند.
+        ("manage_admissions", "مدیریت ثبت‌نام دانش‌آموزان"),
     ]
     perm_objs = {}
     for key, title in perm_defs:
@@ -165,6 +169,9 @@ async def seed(db: AsyncSession) -> None:
         db.add(RolePermission(role_id=role_ministry.id, permission_id=p.id))
     for p in district_perms.values():
         db.add(RolePermission(role_id=role_province.id, permission_id=p.id))
+    # manage_admissions در perm_defs ساخته شد (کلید یکتا)؛ نقش استان
+    # صراحتاً همان مجوز را می‌گیرد تا درخواست‌های بدون مدرسه را هم ببیند.
+    db.add(RolePermission(role_id=role_province.id, permission_id=perm_objs["manage_admissions"].id))
     await db.flush()
 
     from app.models.org import Employee, Employment, SchoolAssignment
@@ -225,6 +232,8 @@ async def seed(db: AsyncSession) -> None:
         (province_admin, role_province, (perm_province,), "province", prov.id),
         (province_admin, role_province, (perm_national,), "national", 0),
         (province_admin, role_province, tuple(district_perms.values()), "province", prov.id),
+        # Feature B: پذیرش ثبت‌نام در حوزه استان (دیدن درخواست‌های بدون مدرسه)
+        (province_admin, role_province, (perm_objs["manage_admissions"],), "province", prov.id),
         (ministry_user, role_ministry, (perm_province, perm_national), "national", 0),
     ]:
         for p in perms:

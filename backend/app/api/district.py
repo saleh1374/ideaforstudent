@@ -41,6 +41,7 @@ DISTRICT_ADMIN_PERMISSIONS = [
     "manage_district_staff",
     "manage_employment_policy",
     "manage_teacher_qualifications",
+    "manage_admissions",  # Feature B: پذیرش ثبت‌نام دانش‌آموزان ناحیه
 ]
 
 

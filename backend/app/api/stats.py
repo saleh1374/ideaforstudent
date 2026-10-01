@@ -1,15 +1,76 @@
 """Province / ministry APIs (roadmap phase 7): تجمیع‌های province /
-national_topic_stats + نمای کلان — با قاعده حداقل جمعیت ۱۰."""
+national_topic_stats + نمای کلان — با قاعده حداقل جمعیت ۱۰ + حوزه تماس‌گیرنده
+(/geo/me برای پنل استان در فرانت‌اند)."""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import AuthUser, require_permission
+from app.api.deps import AuthUser, get_current_user, require_permission
 from app.core.db import get_db
-from app.models.org import Province
+from app.models.org import ClassRoom, District, Employee, Province, School, SchoolAssignment
 from app.services import insights, stats_service
+from app.services.rbac_service import user_scopes
 
 router = APIRouter(prefix="/geo", tags=["province", "ministry"])
+
+
+@router.get("/me")
+async def geo_me(
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """حوزه جغرافیایی تماس‌گیرنده (فقط احراز هویت، هر نقشی): از تخصیص‌های
+    مجوز فعال (PermissionAssignment) و در نبود آن، از تخصیص مدرسه‌اش استخراج
+    می‌شود — موتور مسیر /province در فرانت‌اند (استان → ناحیه → مدرسه)."""
+    scopes = set(await user_scopes(db, current.id))
+    province_id: int | None = None
+    district_id: int | None = None
+
+    # ۱) حوزه‌های صریح مجوز: province / district
+    for scope_type, scope_id in sorted(scopes):
+        if scope_type == "province" and province_id is None:
+            province_id = scope_id
+        elif scope_type == "district" and district_id is None:
+            district_id = scope_id
+
+    # ۲) مدرسه/کلاسِ حوزه‌مند → استان و ناحیه مدرسه
+    school_ids = [scope_id for scope_type, scope_id in scopes if scope_type == "school"]
+    for scope_type, scope_id in scopes:
+        if scope_type == "class":
+            class_room = await db.get(ClassRoom, scope_id)
+            if class_room is not None:
+                school_ids.append(class_room.school_id)
+
+    # ۳) در نبود هر دو: آخرین تخصیص فعال مدرسه (مثلاً مدیر/معلم مدرسه)
+    if not school_ids and (province_id is None or district_id is None):
+        rows = (
+            await db.execute(
+                select(SchoolAssignment.school_id)
+                .join(Employee, Employee.id == SchoolAssignment.employee_id)
+                .where(Employee.user_id == current.id, SchoolAssignment.status == "active")
+                .order_by(SchoolAssignment.id)
+            )
+        ).all()
+        school_ids = [school_id for (school_id,) in rows]
+
+    for school_id in sorted(set(school_ids)):
+        school = await db.get(School, school_id)
+        if school is None:
+            continue
+        if province_id is None:
+            province_id = school.province_id
+        if district_id is None:
+            district_id = school.district_id
+        if province_id is not None and district_id is not None:
+            break
+
+    # ۴) فقط حوزه ناحیه داریم → استان از همان ناحیه
+    if province_id is None and district_id is not None:
+        district = await db.get(District, district_id)
+        if district is not None:
+            province_id = district.province_id
+
+    return {"province_id": province_id, "district_id": district_id, "role": current.system_role}
 
 
 @router.get("/province/{province_id}/overview")

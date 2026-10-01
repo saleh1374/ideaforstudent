@@ -1,20 +1,23 @@
 """Admin APIs (school admin spec + district spec + RBAC spec §16-18):
 aggregated overviews, employment request inbox with scope filtering,
 permission grant/revoke with the golden rule (403 on denial), deputies
-(معاونان §6) and teacher transfer (§10)."""
-from datetime import date
+(معاونان §6), teacher transfer (§10) + فهرست معلمان، ثبت‌نام/پذیرش
+دانش‌آموز و افزودن مستقیم دانش‌آموز (Features A/B)."""
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AuthUser, get_current_user, require_permission
 from app.core.db import get_db
+from app.core.passwords import hash_password
 from app.models.employment import EmploymentPolicyRule, EmploymentRequest
-from app.models.org import Employee, School, SchoolAssignment, StudentProfile, User
+from app.models.org import AdmissionRequest, ClassRoom, Employee, School, SchoolAssignment, StudentProfile, User
 from app.models.rbac import Deputy, Permission, Role
 from app.models.slm import StudentTopicState
+from app.services import admission as admission_svc
 from app.services.employment import decide_request, is_principal_of, submit_teacher_request
 from app.services.rbac_service import (
     check_delegation_scope,
@@ -22,6 +25,7 @@ from app.services.rbac_service import (
     effective_permissions,
     grant_permission,
     grants_of,
+    has_permission,
     has_permission_in_scope,
     log_action,
     revoke_permission,
@@ -133,25 +137,100 @@ async def class_summary_endpoint(
 # ------------------------- گردش کار استخدام (حوزه‌مند) -------------------------
 
 
+@router.get("/teachers-directory")
+async def teachers_directory(
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """فهرست معلمان برای «انتخاب معلم از فهرست» در درخواست استخدام (Feature A
+    — جایگزین فرم هاردکد): همه کاربران با نقش معلم به همراه تخصیص‌های فعالشان.
+    گارد: داشتن view_students یا manage_employment (در هر حوزه‌ای). دید
+    حوزه‌مند: متقاضی می‌تواند از روی active_assignments ببیند معلم کجا شاغل
+    است و available فقط برای معلمان بدون هیچ تخصیص فعالی True است."""
+    if not (
+        await has_permission(db, current.id, "view_students")
+        or await has_permission(db, current.id, "manage_employment")
+    ):
+        raise HTTPException(403, "دسترسی لازم: view_students یا manage_employment")
+
+    teachers = (
+        await db.execute(select(User).where(User.system_role == "teacher").order_by(User.id))
+    ).scalars().all()
+    if not teachers:
+        return {"total": 0, "teachers": []}
+
+    teacher_ids = [t.id for t in teachers]
+    employees = (
+        await db.execute(select(Employee).where(Employee.user_id.in_(teacher_ids)))
+    ).scalars().all()
+
+    schools = {s.id: s.name for s in (await db.execute(select(School))).scalars().all()}
+
+    assignments_by_user: dict[int, list[SchoolAssignment]] = {}
+    if employees:
+        employee_user = {e.id: e.user_id for e in employees}
+        rows = (
+            await db.execute(
+                select(SchoolAssignment)
+                .where(
+                    SchoolAssignment.employee_id.in_([e.id for e in employees]),
+                    SchoolAssignment.status == "active",
+                )
+                .order_by(SchoolAssignment.id)
+            )
+        ).scalars().all()
+        for assignment in rows:
+            user_id = employee_user.get(assignment.employee_id)
+            if user_id is not None:
+                assignments_by_user.setdefault(user_id, []).append(assignment)
+
+    out = []
+    for t in teachers:
+        assigns = assignments_by_user.get(t.id, [])
+        out.append(
+            {
+                "user_id": t.id,
+                "full_name": t.full_name,
+                "username": t.username,
+                "subjects": sorted({a.subject for a in assigns if a.subject}),
+                "active_assignments": [
+                    {
+                        "school_id": a.school_id,
+                        "school_name": schools.get(a.school_id),
+                        "role": a.role,
+                        "subject": a.subject,
+                    }
+                    for a in assigns
+                ],
+                "available": not assigns,
+            }
+        )
+    return {"total": len(out), "teachers": out}
+
+
 @router.get("/employment-requests")
 async def list_employment_requests(
     current: AuthUser = Depends(require_permission("manage_employment")),
     db: AsyncSession = Depends(get_db),
 ):
     """فقط درخواست‌های مدارسِ در حوزه دید تماس‌گیرنده (مدیر ناحیه ناحیه خودش
-    را می‌بیند — district spec §33 دسترسی مبتنی بر محدوده)."""
+    را می‌بیند — district spec §33 دسترسی مبتنی بر محدوده). سطرها برای UI
+    نام مدرسه و شناسه معلم (teacher_user_id) هم دارند."""
     rows = (
         await db.execute(select(EmploymentRequest).order_by(EmploymentRequest.created_at.desc()))
     ).scalars().all()
     visible = await visible_school_ids(db, current.id, "manage_employment")
     if visible is not None:
         rows = [r for r in rows if r.school_id in visible]
+    schools = {s.id: s.name for s in (await db.execute(select(School))).scalars().all()}
     return {
         "requests": [
             {
                 "id": r.id,
                 "school_id": r.school_id,
+                "school_name": schools.get(r.school_id),
                 "full_name": r.full_name,
+                "teacher_user_id": r.employee_user_id,
                 "employment_type": r.employment_type,
                 "organization": r.organization,
                 "subject": r.subject,
@@ -165,8 +244,9 @@ async def list_employment_requests(
 
 class TeacherRequestIn(BaseModel):
     school_id: int
-    employee_user_id: int
-    full_name: str
+    teacher_user_id: int | None = None  # مسیر جدید: انتخاب از فهرست معلمان
+    employee_user_id: int | None = None  # سازگاری عقب‌رو با payloadهای قدیمی
+    full_name: str | None = None  # اختیاری — همیشه از پروفایل کاربر پر می‌شود
     employment_type: str
     organization: str = "government"
     subject: str | None = None
@@ -179,7 +259,9 @@ async def create_teacher_request(
     db: AsyncSession = Depends(get_db),
 ):
     """ثبت فقط توسط مدیر همان مدرسه (principal فعال) یا دارنده حوزه
-    ناحیه/استان روی آن مدرسه (RBAC spec §5 + district spec §14)."""
+    ناحیه/استان روی آن مدرسه (RBAC spec §5 + district spec §14).
+    انتخاب معلم با teacher_user_id (Feature A): کاربر باید وجود داشته باشد،
+    نقشش teacher باشد و در این مدرسه تخصیص فعال نداشته باشد (409)."""
     school = await db.get(School, body.school_id)
     if school is None:
         raise HTTPException(404, "مدرسه یافت نشد")
@@ -189,12 +271,46 @@ async def create_teacher_request(
             raise HTTPException(
                 403, "ثبت درخواست استخدام فقط برای مدیر همان مدرسه یا مسئول ناحیه/استان مجاز است"
             )
+
+    # شناسه معلم: teacher_user_id (جدید) یا employee_user_id (سازگاری عقب‌رو)
+    teacher_user_id = (
+        body.teacher_user_id if body.teacher_user_id is not None else body.employee_user_id
+    )
+    if teacher_user_id is None:
+        raise HTTPException(400, "شناسه معلم (teacher_user_id) الزامی است")
+    teacher = await db.get(User, teacher_user_id)
+    if teacher is None:
+        raise HTTPException(404, "کاربر یافت نشد")
+    # اعتبارسنجی نقش فقط در مسیر جدید؛ مسیر قدیمی employee_user_id صرفاً
+    # شناسه کاربر را می‌پذیرد (سازگاری با payloadهای موجود)
+    if body.teacher_user_id is not None and teacher.system_role != "teacher":
+        raise HTTPException(400, "فقط کاربران با نقش معلم قابل انتخاب هستند")
+
+    # این معلم هم‌اکنون در این مدرسه شاغل است؟
+    employee = (
+        await db.execute(select(Employee).where(Employee.user_id == teacher.id))
+    ).scalar_one_or_none()
+    if employee is not None:
+        active = (
+            await db.execute(
+                select(SchoolAssignment.id)
+                .where(
+                    SchoolAssignment.employee_id == employee.id,
+                    SchoolAssignment.school_id == body.school_id,
+                    SchoolAssignment.status == "active",
+                )
+                .limit(1)
+            )
+        ).first()
+        if active is not None:
+            raise HTTPException(409, "این معلم هم‌اکنون در این مدرسه شاغل است")
+
     result = await submit_teacher_request(
         db,
         school_id=body.school_id,
         requested_by=current.id,
-        employee_user_id=body.employee_user_id,
-        full_name=body.full_name,
+        employee_user_id=teacher.id,
+        full_name=teacher.full_name,  # نام از پروفایل کاربر — مغایرت کلاینت نادیده گرفته می‌شود
         employment_type=body.employment_type,
         organization=body.organization,
         subject=body.subject,
@@ -709,4 +825,283 @@ async def transfer_assignment(
         "new_assignment_id": new_assignment.id,
         "status": assignment.status,
         "effective_date": effective,
+    }
+
+
+# ------------------------- پذیرش ثبت‌نام دانش‌آموز (Feature B) -------------------------
+
+ADMISSION_STATUSES = ("pending", "approved", "rejected")
+
+
+@router.get("/admission-requests")
+async def list_admission_requests(
+    status: str | None = None,
+    current: AuthUser = Depends(require_permission("manage_admissions")),
+    db: AsyncSession = Depends(get_db),
+):
+    """درخواست‌های ثبت‌نام در حوزه دید تماس‌گیرنده: مدرسه‌دار فقط مدرسه
+    خودش را می‌بیند؛ ناحیه/استان/کشور (حوزه وسیع) درخواست‌های بدون مدرسه
+    را هم می‌بینند تا هنگام تأیید مدرسه‌شان را تعیین کنند."""
+    if status is not None and status not in ADMISSION_STATUSES:
+        raise HTTPException(400, "وضعیت نامعتبر است (pending | approved | rejected)")
+    rows = (
+        await db.execute(select(AdmissionRequest).order_by(AdmissionRequest.created_at.desc(), AdmissionRequest.id.desc()))
+    ).scalars().all()
+
+    visible = await visible_school_ids(db, current.id, "manage_admissions")
+    grants = await grants_of(db, current.id, "manage_admissions")
+    broad = any(scope_type in BROAD_SCOPES for scope_type, _ in grants)
+    schools = {s.id: s.name for s in (await db.execute(select(School))).scalars().all()}
+
+    out = []
+    for r in rows:
+        if visible is not None:
+            if r.school_id is None:
+                if not broad:
+                    continue  # بدون مدرسه → فقط سطح ناحیه و بالاتر
+            elif r.school_id not in visible:
+                continue
+        if status is not None and r.status != status:
+            continue
+        out.append(
+            {
+                "id": r.id,
+                "full_name": r.full_name,
+                "username": r.username,
+                "grade": r.grade,
+                "phone": r.phone,
+                "school_id": r.school_id,
+                "school_name": schools.get(r.school_id) if r.school_id is not None else None,
+                "status": r.status,
+                "created_at": r.created_at,
+            }
+        )
+    return {"total": len(out), "requests": out}
+
+
+class AdmissionDecisionIn(BaseModel):
+    approve: bool
+    class_id: int | None = None  # اگر ندهید: نخستین کلاس مدرسه انتخاب می‌شود
+    school_id: int | None = None  # فقط برای درخواست‌های بدون مدرسه انتخابی
+
+
+@router.post("/admission-requests/{request_id}/decide")
+async def decide_admission_request(
+    request_id: int,
+    body: AdmissionDecisionIn,
+    current: AuthUser = Depends(require_permission("manage_admissions")),
+    db: AsyncSession = Depends(get_db),
+):
+    """تصمیم روی درخواست ثبت‌نام: تأیید = ساخت فوری کاربر (is_active) +
+    پروفایل دانش‌آموز؛ رد = فقط تغییر وضعیت. گارد حوزه روی مدرسه خودِ
+    درخواست است (مدرسه خارج از حوزه → 403)."""
+    req = await db.get(AdmissionRequest, request_id)
+    if req is None:
+        raise HTTPException(404, "درخواست ثبت‌نام یافت نشد")
+
+    # گارد حوزه: مدرسه درخواست باید در حوزه manage_admissions تماس‌گیرنده باشد
+    if req.school_id is not None:
+        if not await has_permission_in_scope(db, current.id, "manage_admissions", "school", req.school_id):
+            raise HTTPException(403, "دسترسی لازم manage_admissions در حوزه این مدرسه")
+    else:
+        grants = await grants_of(db, current.id, "manage_admissions")
+        if not any(scope_type in BROAD_SCOPES for scope_type, _ in grants):
+            raise HTTPException(403, "تعیین مدرسه برای درخواست بدون مدرسه فقط در سطح ناحیه و بالاتر مجاز است")
+
+    if req.status != "pending":
+        raise HTTPException(409, "این درخواست قبلاً بررسی شده است")
+
+    if not body.approve:
+        req.status = "rejected"
+        req.decided_by = current.id
+        req.decided_at = datetime.now(timezone.utc)
+        await log_action(
+            db,
+            actor_user_id=current.id,
+            action="admission_rejected",
+            entity_type="admission_request",
+            entity_id=req.id,
+            detail=f"username={req.username} school={req.school_id}",
+        )
+        await db.commit()
+        return {"ok": True, "status": "rejected", "request_id": req.id}
+
+    # ---- تأیید: مدرسه و کلاس را روشن کن ----
+    school_id = req.school_id
+    if school_id is None:
+        if body.school_id is not None:
+            school_id = body.school_id
+        elif body.class_id is not None:
+            class_row = await db.get(ClassRoom, body.class_id)
+            if class_row is None:
+                raise HTTPException(404, "کلاس یافت نشد")
+            school_id = class_row.school_id
+        else:
+            raise HTTPException(400, "برای این درخواست باید مدرسه‌ای تعیین شود")
+    if await db.get(School, school_id) is None:
+        raise HTTPException(404, "مدرسه یافت نشد")
+
+    if body.class_id is not None:
+        class_room = await db.get(ClassRoom, body.class_id)
+        if class_room is None:
+            raise HTTPException(404, "کلاس یافت نشد")
+        if class_room.school_id != school_id:
+            raise HTTPException(400, "کلاس انتخاب‌شده به این مدرسه تعلق ندارد")
+        class_id = class_room.id
+    else:
+        class_id = await admission_svc.first_class_of_school(db, school_id)
+
+    # نام کاربری باید هنوز در جدول کاربران آزاد باشد (خودِ درخواست pending است)
+    if (await db.execute(select(User.id).where(User.username == req.username))).first() is not None:
+        raise HTTPException(409, admission_svc.DUP_USERNAME)
+
+    user = User(
+        username=req.username,
+        password_hash=req.password_hash,
+        full_name=req.full_name,
+        phone=req.phone,
+        system_role="student",
+        is_active=True,
+    )
+    db.add(user)
+    await db.flush()
+    profile = StudentProfile(
+        user_id=user.id,
+        grade=req.grade,
+        school_id=school_id,
+        class_id=class_id,
+        status="active",
+    )
+    db.add(profile)
+
+    req.school_id = school_id
+    req.class_id = class_id
+    req.status = "approved"
+    req.decided_by = current.id
+    req.decided_at = datetime.now(timezone.utc)
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="admission_approved",
+        entity_type="admission_request",
+        entity_id=req.id,
+        detail=f"username={req.username} school={school_id} class={class_id}",
+    )
+    await db.commit()
+    return {
+        "ok": True,
+        "status": "approved",
+        "request_id": req.id,
+        "user_id": user.id,
+        "school_id": school_id,
+        "class_id": class_id,
+    }
+
+
+# ------------------------- کلاس‌ها و افزودن مستقیم دانش‌آموز (Feature B) -------------------------
+
+
+@router.get("/school/{school_id}/classes")
+async def school_classes(
+    school_id: int,
+    current: AuthUser = Depends(require_permission("view_students", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """کلاس‌های مدرسه برای انتخابگر کلاس (تأیید ثبت‌نام / افزودن مستقیم) —
+    همان گارد حوزه مدرسه بقیه endpointهای /admin/school/*."""
+    if await db.get(School, school_id) is None:
+        raise HTTPException(404, "مدرسه یافت نشد")
+    classes = (
+        await db.execute(select(ClassRoom).where(ClassRoom.school_id == school_id).order_by(ClassRoom.id))
+    ).scalars().all()
+    counts: dict[int, int] = {}
+    if classes:
+        rows = (
+            await db.execute(
+                select(StudentProfile.class_id, func.count())
+                .where(StudentProfile.class_id.in_([c.id for c in classes]))
+                .group_by(StudentProfile.class_id)
+            )
+        ).all()
+        counts = {class_id: total for class_id, total in rows}
+    return [
+        {
+            "id": c.id,
+            "name": c.name,
+            "grade": c.grade,
+            "capacity": c.capacity,
+            "students_count": counts.get(c.id, 0),
+        }
+        for c in classes
+    ]
+
+
+class DirectStudentIn(BaseModel):
+    username: str
+    password: str
+    full_name: str
+    grade: str
+    class_id: int
+
+
+@router.post("/students")
+async def create_student_direct(
+    body: DirectStudentIn,
+    current: AuthUser = Depends(require_permission("manage_admissions")),
+    db: AsyncSession = Depends(get_db),
+):
+    """«افزودن مستقیم دانش‌آموز» توسط مدیر مدرسه (بدون ثبت‌نام عمومی):
+    کاربر + پروفایل در همان لحظه ساخته می‌شوند؛ حوزه manage_admissions باید
+    همان کلاس را بپوشاند (کلاس مدرسه دیگر → 403)."""
+    username = body.username.strip()
+    if not admission_svc.username_format_ok(username):
+        raise HTTPException(400, "نام کاربری نامعتبر است")
+    if len(body.password) < 6:
+        raise HTTPException(400, "رمز عبور باید حداقل ۶ نویسه باشد")
+    if not body.full_name.strip():
+        raise HTTPException(400, "نام کامل الزامی است")
+    if not admission_svc.grade_ok(body.grade):
+        raise HTTPException(400, "پایه تحصیلی نامعتبر است")
+
+    class_room = await db.get(ClassRoom, body.class_id)
+    if class_room is None:
+        raise HTTPException(404, "کلاس یافت نشد")
+    if not await has_permission_in_scope(db, current.id, "manage_admissions", "class", class_room.id):
+        raise HTTPException(403, "دسترسی لازم manage_admissions در حوزه این کلاس")
+
+    if await admission_svc.username_taken(db, username):
+        raise HTTPException(409, admission_svc.DUP_USERNAME)
+
+    user = User(
+        username=username,
+        password_hash=hash_password(body.password),
+        full_name=body.full_name.strip(),
+        system_role="student",
+        is_active=True,
+    )
+    db.add(user)
+    await db.flush()
+    profile = StudentProfile(
+        user_id=user.id,
+        grade=body.grade,
+        school_id=class_room.school_id,
+        class_id=class_room.id,
+        status="active",
+    )
+    db.add(profile)
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="student_created",
+        entity_type="user",
+        entity_id=user.id,
+        detail=f"class={class_room.id} school={class_room.school_id} grade={body.grade}",
+    )
+    await db.commit()
+    return {
+        "ok": True,
+        "user_id": user.id,
+        "profile_id": profile.id,
+        "school_id": class_room.school_id,
+        "class_id": class_room.id,
     }

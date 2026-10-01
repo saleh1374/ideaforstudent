@@ -1,0 +1,19 @@
+/**
+ * نگاشت نقش → صفحهٔ خانه (پس از ورود و برای redirect‌های محافظت‌شده).
+ * هر نقش مدیریتی دقیقاً یک پنل اصلی دارد.
+ */
+export const HOME: Record<string, string> = {
+  student: "/student",
+  teacher: "/teacher",
+  school_admin: "/admin",
+  district_admin: "/district",
+  province_admin: "/province",
+  ministry: "/geo",
+  parent: "/parent",
+};
+
+/** صفحهٔ خانهٔ نقش؛ برای نقش‌های ناشناس «بردهای تحلیلی» (هرگز /admin). */
+export function homeFor(role: string | null | undefined): string {
+  if (role && HOME[role]) return HOME[role];
+  return "/boards";
+}

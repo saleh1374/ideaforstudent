@@ -1,6 +1,6 @@
 """Phase 0 — Organizational core: Province → District → School → Class, and
 User → Employee → Employment → SchoolAssignment (RBAC spec §2, §4, §5)."""
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import (
     Boolean,
@@ -193,3 +193,28 @@ class ParentLink(Base):
     student_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     relation: Mapped[str | None] = mapped_column(String(30))
     status: Mapped[str] = mapped_column(String(20), default="active")
+
+
+class AdmissionRequest(Base):
+    """درخواست ثبت‌نام عمومی دانش‌آموز (Feature B): کاربرِ ورودی تا تأیید
+    مدیر مدرسه ساخته نمی‌شود — فقط رمز هنگام ثبت هش می‌شود تا تأیید فوری
+    باشد. نام کاربری بین کاربران موجود و درخواست‌های در انتظار یکتاست."""
+
+    __tablename__ = "admission_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    full_name: Mapped[str] = mapped_column(String(150))
+    username: Mapped[str] = mapped_column(String(64), index=True)
+    password_hash: Mapped[str] = mapped_column(String(128))
+    grade: Mapped[str] = mapped_column(String(20))  # grade_7 ... grade_12
+    phone: Mapped[str | None] = mapped_column(String(15))
+    school_id: Mapped[int | None] = mapped_column(ForeignKey("schools.id"))  # مدرسه انتخابی هنگام ثبت
+    class_id: Mapped[int | None] = mapped_column(ForeignKey("classes.id"))  # هنگام تأیید تعیین می‌شود
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    # pending | approved | rejected
+    submitted_note: Mapped[str | None] = mapped_column(String(300))
+    decided_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+
+    school = relationship("School")

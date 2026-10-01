@@ -47,6 +47,15 @@ export const subjectFa = (value?: string | null): string =>
 export const gradeFa = (value?: string | null): string =>
   (value && (GRADE_FA[value] || value)) || "—";
 
+/** کلیدهای پایهٔ تحصیلی برای فرم‌ها (ثبت‌نام، افزودن مستقیم دانش‌آموز). */
+export const GRADE_KEYS = ["grade_7", "grade_8", "grade_9", "grade_10", "grade_11", "grade_12"] as const;
+
+/** گزینه‌های <select> پایهٔ تحصیلی: { value, label }. */
+export const GRADE_OPTIONS: { value: string; label: string }[] = GRADE_KEYS.map((k) => ({
+  value: k,
+  label: GRADE_FA[k] ?? k,
+}));
+
 export const CAUSE_FA: Record<string, string> = {
   conceptual: "ضعف مفهومی",
   prerequisite: "ضعف پیش‌نیاز",
@@ -153,10 +162,22 @@ export const EMPLOYMENT_TYPE_FA: Record<string, string> = {
   contractual: "قراردادی",
   part_time: "پاره‌وقت",
   temporary: "موقت",
+  // مقادیر بزرگ‌نویسِ سرویس استخدام مدرسه (POST /admin/employment-requests)
+  FORMAL: "رسمی",
+  COOPERATIVE: "قراردادی",
+  PART_TIME: "پاره‌وقت",
 };
 
 export const REQUEST_STATUS_FA: Record<string, string> = {
   pending: "در انتظار تأیید ناحیه",
+  approved: "تأییدشده",
+  rejected: "ردشده",
+  auto_approved: "تأیید خودکار (سیاست)",
+};
+
+/** وضعیت درخواست ثبت‌نام دانش‌آموز (کارتابل مدیر مدرسه). */
+export const ADMISSION_STATUS_FA: Record<string, string> = {
+  pending: "در انتظار",
   approved: "تأییدشده",
   rejected: "ردشده",
   auto_approved: "تأیید خودکار (سیاست)",

@@ -18,6 +18,11 @@ next-env.d.ts
 # Database backups
 *.db.backup-*
 
+# SQLite temp files (journals/wal left by interrupted runs)
+*.db-journal
+*.db-wal
+*.db-shm
+
 # Env / IDE
 .env
 .env.local

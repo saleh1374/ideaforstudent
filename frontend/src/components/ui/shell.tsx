@@ -69,8 +69,9 @@ const NAV: NavGroup[] = [
   {
     title: "مدیریت",
     items: [
-      { href: "/admin", label: "مدیریت مدرسه", icon: IconSchool, roles: ["school_admin", "district_admin"] },
-      { href: "/geo", label: "استان و کشور", icon: IconMap, roles: ["province_admin", "ministry"] },
+      { href: "/admin", label: "مدیریت مدرسه", icon: IconSchool, roles: ["school_admin"] },
+      { href: "/province", label: "پنل مدیر کل استان", icon: IconMap, roles: ["province_admin"] },
+      { href: "/geo", label: "استان و کشور", icon: IconMap, roles: ["ministry"] },
     ],
   },
   {

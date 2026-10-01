@@ -53,6 +53,19 @@ export type ErrorOut = {
   created_at: string;
 };
 
+/** خطای HTTP همراه با کد وضعیت — برای شاخه‌بندی واکنش‌های 400/403/404/409. */
+export class ApiError extends Error {
+  readonly status: number;
+  /** متن detail سرور (در صورت وجود) — بدون متن پیش‌فرض مرورگر. */
+  readonly detail?: string;
+  constructor(message: string, status: number, detail?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 const TOKEN_KEY = "daneshyar_token";
 
 export function getToken(): string | null {
@@ -80,11 +93,18 @@ export async function api<T>(path: string, init?: RequestInit & { json?: unknown
     window.location.href = "/login";
   }
   if (!res.ok) {
-    let detail = res.statusText;
+    let detail: string | undefined;
     try {
-      detail = (await res.json()).detail ?? detail;
-    } catch {}
-    throw new Error(detail);
+      const body: unknown = await res.json();
+      if (body && typeof body === "object") {
+        const b = body as Record<string, unknown>;
+        if (typeof b.detail === "string") detail = b.detail;
+        else if (typeof b.message_fa === "string") detail = b.message_fa;
+      }
+    } catch {
+      /* بدنه بدون JSON */
+    }
+    throw new ApiError(detail ?? res.statusText, res.status, detail);
   }
   return res.json();
 }
