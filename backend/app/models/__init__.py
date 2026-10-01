@@ -9,5 +9,6 @@ from app.models import (  # noqa: F401
     rbac,
     slm,
     stats,
+    teacher_assessment,
     tutoring,
 )

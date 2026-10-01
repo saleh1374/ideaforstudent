@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     retest_close_days: int = 7           # مهلت بازآزمون
     retest_pass_ratio: float = 0.75      # نسبت پاسخ درست هر مبحث برای «رفع خطا»
 
+    # Teacher qualification exams (آزمون صلاحیت معلم — خواسته کارفرما)
+    teacher_exam_items: int = 10           # تعداد سؤال هر آزمون (نمونه از بانک)
+    teacher_pass_score: float = 60.0       # حداقلِ هر دو آزمون برای «تأیید صلاحیت»
+    teacher_critical_score: float = 40.0   # زیر این حد → وضعیت بحرانی
+    teacher_exam_window_days: int = 14     # مهلت پاسخ‌گویی به آزمون از لحظه تخصیص
+
     # AI assistant (roadmap phase 6)
     assistant_cache_similarity: float = 0.85   # آستانه شباهت کش معنایی (Jaccard)
     assistant_evidence_weight: float = 0.15    # وزن شاهد ai_chat در SLM

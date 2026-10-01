@@ -143,6 +143,9 @@ export default function AdminPage() {
   const [form, setForm] = useState({ employee_user_id: 7, full_name: "", employment_type: "contractual", subject: "math" });
   const [submitting, setSubmitting] = useState(false);
 
+  // تأیید/رد استخدام فقط سطح ناحیه و بالاتر (بک‌اند scope ناحیه را چک می‌کند)
+  const canDecide = role === "district_admin" || role === "province_admin" || role === "platform_admin";
+
   const loadAll = useCallback(async () => {
     if (!getToken()) {
       window.location.href = "/login";
@@ -151,11 +154,25 @@ export default function AdminPage() {
     try {
       const me = await api<{ role: string }>("/auth/me");
       setRole(me.role);
-      setOv(await api<Overview>("/admin/school/1/overview"));
-      setCmp(await api<CompareData>("/admin/school/1/classes-compare/math"));
-      setFlags((await api<{ flags: Flag[] }>("/admin/school/1/attention-flags")).flags);
-      setProfiles((await api<{ profiles: TeacherProfile[] }>("/admin/school/1/teachers")).profiles);
-      setRequests((await api<{ requests: Request[] }>("/admin/employment-requests")).requests);
+      // هر بخش مستقل واکشی می‌شود تا 403 یک بخش (حوزه دسترسی)، کل صفحه را نیندازد
+      const parts = await Promise.allSettled([
+        api<Overview>("/admin/school/1/overview"),
+        api<CompareData>("/admin/school/1/classes-compare/math"),
+        api<{ flags: Flag[] }>("/admin/school/1/attention-flags"),
+        api<{ profiles: TeacherProfile[] }>("/admin/school/1/teachers"),
+        api<{ requests: Request[] }>("/admin/employment-requests"),
+      ]);
+      if (parts[0].status === "fulfilled") setOv(parts[0].value);
+      if (parts[1].status === "fulfilled") setCmp(parts[1].value);
+      if (parts[2].status === "fulfilled") setFlags(parts[2].value.flags);
+      if (parts[3].status === "fulfilled") setProfiles(parts[3].value.profiles);
+      if (parts[4].status === "fulfilled") setRequests(parts[4].value.requests);
+      const failed = parts.filter((p) => p.status === "rejected") as PromiseRejectedResult[];
+      if (failed.length === parts.length) {
+        setError(failed[0]?.reason instanceof Error ? failed[0].reason.message : "خطا");
+      } else if (failed.length > 0) {
+        toast("برخی بخش‌ها بر اساس حوزه دسترسی شما نمایش داده نشدند.", "info");
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "خطا");
     } finally {
@@ -576,16 +593,19 @@ export default function AdminPage() {
                         <Badge tone={statusTone(r.status)} dot>
                           {REQ_STATUS_FA[r.status] ?? r.status}
                         </Badge>
-                        {r.status === "pending" && (
-                          <>
-                            <Button size="sm" variant="success" onClick={() => decide(r.id, true)} icon={<IconCheckCircle size={14} />}>
-                              تأیید
-                            </Button>
-                            <Button size="sm" variant="ghost" onClick={() => decide(r.id, false)} icon={<IconX size={14} />}>
-                              رد
-                            </Button>
-                          </>
-                        )}
+                        {r.status === "pending" &&
+                          (canDecide ? (
+                            <>
+                              <Button size="sm" variant="success" onClick={() => decide(r.id, true)} icon={<IconCheckCircle size={14} />}>
+                                تأیید
+                              </Button>
+                              <Button size="sm" variant="ghost" onClick={() => decide(r.id, false)} icon={<IconX size={14} />}>
+                                رد
+                              </Button>
+                            </>
+                          ) : (
+                            <span className="text-[11px] text-ink-muted">در انتظار تصمیم ناحیه</span>
+                          ))}
                       </div>
                     </Card>
                   ))}

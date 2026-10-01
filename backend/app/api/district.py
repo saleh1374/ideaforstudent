@@ -14,7 +14,9 @@ from app.core.passwords import hash_password
 from app.models.employment import EmploymentRequest
 from app.models.org import District, Employee, Employment, School, SchoolAssignment, User
 from app.models.rbac import Permission, Role, RolePermission
+from app.models.teacher_assessment import TeacherIntervention
 from app.services import district as district_svc
+from app.services import teacher_qualification as tq_svc
 from app.services.rbac_service import (
     check_delegation_scope,
     grant_permission,
@@ -38,6 +40,7 @@ DISTRICT_ADMIN_PERMISSIONS = [
     "manage_principals",
     "manage_district_staff",
     "manage_employment_policy",
+    "manage_teacher_qualifications",
 ]
 
 
@@ -451,3 +454,125 @@ async def employment_requests(
             for r in rows
         ],
     }
+
+
+# ------------------- آزمون صلاحیت معلم (سند صلاحیت) -------------------
+
+
+@router.get("/teachers")
+async def district_teachers(
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """معلمان دارای تخصیص فعال در مدرسه‌های ناحیه + وضعیت صلاحیت سال جاری
+    (برای انتخاب‌گرها و خلاصه پنل ناحیه)."""
+    rows = await tq_svc.district_teachers(db, district_id)
+    return {"district_id": district_id, "total": len(rows), "teachers": rows}
+
+
+class QualificationAssignIn(BaseModel):
+    teacher_user_id: int
+    subject: str
+    school_year: str | None = None
+
+
+@router.post("/teacher-qualifications/assign")
+async def assign_qualification_exams(
+    body: QualificationAssignIn,
+    district_id: int = Depends(district_scope("manage_teacher_qualifications")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """تخصیص هر دو آزمون صلاحیت (درس + مدیریت کلاس) برای سال تحصیلی —
+    idempotent؛ معلم باید همین درس را در مدرسه‌ای از این ناحیه ارائه دهد."""
+    school_year = (body.school_year or "").strip() or tq_svc.current_school_year()
+    result = await tq_svc.assign_year_exams(
+        db,
+        teacher_user_id=body.teacher_user_id,
+        subject=body.subject,
+        school_year=school_year,
+        assigned_by=current.id,
+        district_id=district_id,
+    )
+    await db.commit()
+    return result
+
+
+@router.get("/teacher-qualifications")
+async def list_qualifications(
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    status: str | None = None,
+    school_id: int | None = None,
+    subject: str | None = None,
+    school_year: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """رکوردهای صلاحیت ناحیه با فیلتر وضعیت/مدرسه/درس/سال + درصد هر آزمون
+    و شمار اقدام‌های اصلاحی."""
+    rows = await tq_svc.district_qualifications(
+        db, district_id, status=status, school_id=school_id, subject=subject, school_year=school_year
+    )
+    return {
+        "district_id": district_id,
+        "total": len(rows),
+        "qualifications": rows,
+    }
+
+
+@router.get("/teacher-qualifications/{qualification_id}")
+async def qualification_detail(
+    qualification_id: int,
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """جزئیات رکورد صلاحیت: آزمون‌ها + تلاش‌ها + تاریخچه اقدام‌ها
+    (فقط رکوردهای همین ناحیه؛ خارج از حوزه → 404)."""
+    qual = await tq_svc.district_qualification_or_404(db, qualification_id, district_id)
+    return await tq_svc.qualification_detail(db, qual)
+
+
+class InterventionIn(BaseModel):
+    type: str  # training | mentoring | replacement
+    notes: str | None = None
+
+
+@router.post("/teacher-qualifications/{qualification_id}/interventions")
+async def create_intervention(
+    qualification_id: int,
+    body: InterventionIn,
+    district_id: int = Depends(district_scope("manage_teacher_qualifications")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """ثبت اقدام اصلاحی (دوره/سرپرستی/جایگزینی) — فقط برای وضعیت
+    آزمایشی یا بحرانی (وگرنه 409) + رویداد teacher_intervention_created."""
+    qual = await tq_svc.district_qualification_or_404(db, qualification_id, district_id)
+    row = await tq_svc.record_intervention(db, qual, body.type, body.notes, current.id)
+    await db.commit()
+    return {"ok": True, "intervention": tq_svc.intervention_row(row)}
+
+
+class InterventionStatusIn(BaseModel):
+    status: str  # proposed | scheduled | done | cancelled
+
+
+@router.post("/teacher-qualifications/{qualification_id}/interventions/{intervention_id}/status")
+async def set_intervention_status(
+    qualification_id: int,
+    intervention_id: int,
+    body: InterventionStatusIn,
+    district_id: int = Depends(district_scope("manage_teacher_qualifications")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """به‌روزرسانی وضعیت اقدام؛ بسته‌شدن نرم (done/cancelled) با ثبت زمان."""
+    qual = await tq_svc.district_qualification_or_404(db, qualification_id, district_id)
+    row = await db.get(TeacherIntervention, intervention_id)
+    if row is None or row.qualification_id != qual.id:
+        raise HTTPException(404, "اقدام اصلاحی یافت نشد")
+    row = await tq_svc.update_intervention_status(db, row, body.status)
+    await db.commit()
+    return {"ok": True, "intervention": tq_svc.intervention_row(row)}

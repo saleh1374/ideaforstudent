@@ -138,6 +138,7 @@ async def seed(db: AsyncSession) -> None:
         ("manage_principals", "انتصاب مدیر مدرسه"),
         ("manage_district_staff", "مدیریت کارکنان ناحیه"),
         ("manage_employment_policy", "ویرایش سیاست استخدام"),
+        ("manage_teacher_qualifications", "مدیریت صلاحیت معلم"),
     ]
     district_perms = {}
     for key, title in district_perm_defs:
@@ -328,6 +329,57 @@ async def seed(db: AsyncSession) -> None:
     for i, q in enumerate(qobjs, start=1):
         db.add(ExamItem(exam_id=exam.id, item_id=q.id, order=i, points=2.5))
 
+    # ---------- بانک سؤال آزمون صلاحیت معلم (سند صلاحیت) ----------
+    # جدا از بانک دانش‌آموز: این سؤال‌ها مبحث کاتالوگ ندارند.
+    from app.models.teacher_assessment import TeacherExamQuestion
+
+    subject_bank = [
+        ("دامنه تابع f(x) = ۱/(x−۲) کدام است؟", {"A": "x ≠ ۲", "B": "x > ۲", "C": "x ≠ ۰", "D": "x ≥ ۲"}, "A", "easy"),
+        ("مقدار sin(۳۰°) چقدر است؟", {"A": "۱/۲", "B": "√۳/۲", "C": "۱", "D": "۰"}, "A", "easy"),
+        ("مشتق تابع f(x) = x² در x = ۳ چقدر است؟", {"A": "۳", "B": "۶", "C": "۹", "D": "۲"}, "B", "medium"),
+        ("اگر log₂(x) = ۵ باشد، x چقدر است؟", {"A": "۱۰", "B": "۲۵", "C": "۳۲", "D": "۵"}, "C", "medium"),
+        ("تعداد زیرمجموعه‌های مجموعه‌ای با ۳ عضو چند است؟", {"A": "۶", "B": "۷", "C": "۸", "D": "۹"}, "C", "easy"),
+        ("میانگین اعداد ۲، ۴، ۶، ۸ چقدر است؟", {"A": "۴", "B": "۵", "C": "۶", "D": "۷"}, "B", "easy"),
+        ("شیب خط ۲x + ۳y = ۶ کدام است؟", {"A": "−۲/۳", "B": "۲/۳", "C": "−۳/۲", "D": "۳/۲"}, "A", "medium"),
+        ("احتمال رخ دادن یک رویداد قطعی چقدر است؟", {"A": "۰", "B": "۱/۲", "C": "۱", "D": "۱/۴"}, "C", "easy"),
+        ("مقدار |۳ − ۷| + ۲² کدام است؟", {"A": "۸", "B": "۱۰", "C": "۶", "D": "۱۲"}, "A", "easy"),
+        ("ریشه‌های تابع f(x) = x² − ۴ کدام‌اند؟", {"A": "۲ و −۲", "B": "۴", "C": "۰", "D": "۲"}, "A", "medium"),
+    ]
+    for body, options, correct, diff in subject_bank:
+        db.add(
+            TeacherExamQuestion(
+                kind="subject",
+                subject="math",
+                body=body,
+                options=options,
+                correct_option=correct,
+                difficulty=diff,
+            )
+        )
+
+    management_bank = [
+        ("هنگام بی‌نظمی در کلاس، بهترین اقدام اولیه معلم کدام است؟", {"A": "فریاد زدن برای ساکت‌کردن", "B": "ایجاد ارتباط چشمی و مکث آرام", "C": "ترک کلاس", "D": "گزارش فوری به مدیر"}, "B", "easy"),
+        ("برای مشارکت دانش‌آموزان کم‌رو چه باید کرد؟", {"A": "همیشه داوطلب‌ها را صدا زدن", "B": "پرسش تصادفی و وقت دادن برای فکر کردن", "C": "نمره منفی برای بی‌جوابی", "D": "بی‌توجهی"}, "B", "medium"),
+        ("زمان‌بندی مناسب بازخورد به دانش‌آموز کدام است؟", {"A": "پایان ترم", "B": "بلافاصله پس از انجام کار", "C": "فقط در جلسه اولیا", "D": "بازخورد لازم نیست"}, "B", "easy"),
+        ("اگر دانش‌آموزی مکرر تکلیف ارائه ندهد، مناسب‌ترین واکنش کدام است؟", {"A": "ثبت صفر بی‌قید", "B": "گفت‌وگوی خصوصی و برنامه‌ریزی با پیگیری", "C": "حذف از کلاس", "D": "تنبیه گروهی"}, "B", "medium"),
+        ("تفاوت تدریس متمایز با تدریس یکسان چیست؟", {"A": "برای همه یک روش واحد", "B": "استراتژی و تکلیف متناسب با آمادگی دانش‌آموزان", "C": "کاهش انتظارات", "D": "حذف ارزشیابی"}, "B", "medium"),
+        ("بهترین شیوه مدیریت زمان کلاس کدام است؟", {"A": "همه وقت حل تمرین", "B": "تقسیم زمان برای معرفی، تمرین و جمع‌بندی", "C": "سخنرانی تا آخر وقت", "D": "رها کردن برنامه"}, "B", "easy"),
+        ("هنگام پاسخ اشتباه دانش‌آموز، واکنش مناسب کدام است؟", {"A": "تذکر شدید", "B": "اهمیت دادن به تلاش و هدایت با پرسش‌های راهنما", "C": "بی‌پاسخ گذاشتن", "D": "خنده جمعی"}, "B", "medium"),
+        ("برای ارزشیابی تشخیصی در میانه تدریس کدام بهتر است؟", {"A": "فقط آزمون پایانی", "B": "پرسش کلاسی و کاربرگ کوتاه برای شناسایی سوءتفاهم‌ها", "C": "حذف امتحان", "D": "نمره‌دهی رقابتی"}, "B", "easy"),
+    ]
+    for body, options, correct, diff in management_bank:
+        db.add(
+            TeacherExamQuestion(
+                kind="classroom_management",
+                subject=None,
+                body=body,
+                options=options,
+                correct_option=correct,
+                difficulty=diff,
+            )
+        )
+    await db.flush()  # autoflush خاموش است — پیش از نمونه‌برداری سرویس باید ثبت شوند
+
     # ---------- تخصیص معلم به کلاس (سند معلم §18) ----------
     from app.models.org import ClassTeacherAssignment
 
@@ -413,6 +465,21 @@ async def seed(db: AsyncSession) -> None:
             subject="math",
             is_open=True,
         )
+    )
+
+    # ---------- آزمون صلاحیت معلم: تخصیص نمونه برای معلم ریاضی ----------
+    # فقط تخصیص واقعی (وضع assigned)؛ نمره‌ای جعل نمی‌شود تا رابط کاربری
+    # آزمون‌ها را نشان دهد و معلم خودش آن‌ها را بگذروند.
+    from app.services.teacher_qualification import assign_year_exams, current_school_year
+
+    await assign_year_exams(
+        db,
+        teacher_user_id=teacher.id,
+        subject="math",
+        school_year=current_school_year(),
+        assigned_by=district_admin.id,
+        school_id=school.id,
+        district_id=dist.id,
     )
 
     await db.commit()

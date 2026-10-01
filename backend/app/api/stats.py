@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import AuthUser, require_permission
 from app.core.db import get_db
 from app.models.org import Province
-from app.services import stats_service
+from app.services import insights, stats_service
 
 router = APIRouter(prefix="/geo", tags=["province", "ministry"])
 
@@ -38,6 +38,21 @@ async def province_topics(
     return result
 
 
+@router.get("/province/{province_id}/insights")
+async def province_insights(
+    province_id: int,
+    current: AuthUser = Depends(require_permission("view_province_analytics", scope_type="province", scope_param="province_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """روایت نقاط ضعف استان (تحلیل قاعده‌محور) — حوزه مجوز باید همین
+    استان را بپوشاند؛ استانِ دیگر 403 و بدون هیچ عدد سرکوب‌شده‌ای."""
+    if await db.get(Province, province_id) is None:
+        raise HTTPException(404, "استان یافت نشد")
+    result = await insights.province_insights(db, province_id)
+    await db.commit()  # در صورت بازمحاسبه اولیه تجمیع‌ها ذخیره شوند
+    return result
+
+
 @router.get("/national/overview")
 async def national_overview(
     current: AuthUser = Depends(require_permission("view_national_analytics", scope_type="national", scope_id=0)),
@@ -55,6 +70,18 @@ async def national_topics(
 ):
     result = await stats_service.topic_stats(db, None)
     await db.commit()
+    return result
+
+
+@router.get("/national/insights")
+async def national_insights(
+    current: AuthUser = Depends(require_permission("view_national_analytics", scope_type="national", scope_id=0)),
+    db: AsyncSession = Depends(get_db),
+):
+    """روایت نقاط ضعف کشور + رتب‌بندی استان‌ها (بدون اعداد سرکوب‌شده) —
+    فقط حوزه national (وزارت یا استان دارای مجوز کشوری)."""
+    result = await insights.national_insights(db)
+    await db.commit()  # در صورت بازمحاسبه اولیه تجمیع‌ها ذخیره شوند
     return result
 
 
