@@ -99,6 +99,101 @@ export const CAUSE_SHORT: Record<string, string> = {
   guess: "حدس",
 };
 
+// ------------------- صلاحیت معلم (سند صلاحیت) -------------------
+
+export const QUALIFICATION_STATUS_FA: Record<string, string> = {
+  pending: "در انتظار ارزیابی",
+  qualified: "تأیید صلاحیت",
+  probation: "دوره الزامی (آزمایشی)",
+  critical: "بحرانی",
+};
+
+/** نگاشت وضعیت صلاحیت به رنگ Badge (خودِ سرور status_fa هم می‌فرستد). */
+export const QUALIFICATION_STATUS_TONE: Record<string, "neutral" | "success" | "warning" | "danger"> = {
+  pending: "neutral",
+  qualified: "success",
+  probation: "warning",
+  critical: "danger",
+};
+
+export const INTERVENTION_FA: Record<string, string> = {
+  training: "دوره آموزشی",
+  mentoring: "نظارت و راهنمایی",
+  replacement: "تعویض",
+};
+
+export const INTERVENTION_STATUS_FA: Record<string, string> = {
+  proposed: "پیشنهادی",
+  scheduled: "زمان‌بندی‌شده",
+  done: "انجام‌شده",
+  cancelled: "لغوشده",
+};
+
+export const INTERVENTION_STATUS_TONE: Record<string, "neutral" | "info" | "success" | "warning"> = {
+  proposed: "neutral",
+  scheduled: "info",
+  done: "success",
+  cancelled: "warning",
+};
+
+export const EXAM_STATUS_FA: Record<string, string> = {
+  assigned: "تخصیص‌یافته",
+  in_progress: "در حال برگزاری",
+  completed: "تکمیل‌شده",
+  expired: "منقضی",
+};
+
+/** حروف گزینه‌های چهارگزینه‌ای آزمون صلاحیت. */
+export const OPTION_LETTER_FA: Record<string, string> = { A: "الف", B: "ب", C: "ج", D: "د" };
+
+// ------------------- سازمانی / استخدام (پنل ناحیه) -------------------
+
+export const EMPLOYMENT_TYPE_FA: Record<string, string> = {
+  official: "رسمی",
+  contractual: "قراردادی",
+  part_time: "پاره‌وقت",
+  temporary: "موقت",
+};
+
+export const REQUEST_STATUS_FA: Record<string, string> = {
+  pending: "در انتظار تأیید ناحیه",
+  approved: "تأییدشده",
+  rejected: "ردشده",
+  auto_approved: "تأیید خودکار (سیاست)",
+};
+
+export const SCHOOL_TYPE_FA: Record<string, string> = {
+  elementary: "ابتدایی",
+  middle_school: "متوسطه اول",
+  high_school: "متوسطه دوم",
+};
+
+export const OWNERSHIP_FA: Record<string, string> = {
+  public: "دولتی",
+  non_profit: "غیرانتفاعی",
+  private: "آزاد",
+};
+
+export const STAFF_ROLE_FA: Record<string, string> = {
+  district_admin: "مدیر ناحیه",
+  district_staff: "کارمند ناحیه",
+  teacher: "معلم",
+};
+
+/** کلیدهای مجوزِ قابل تفویض توسط مدیر ناحیه (برچسب فارسی از seed). */
+export const PERMISSION_FA: Record<string, string> = {
+  view_district_analytics: "مشاهده تحلیل ناحیه",
+  view_school_analytics: "مشاهده تحلیل مدرسه",
+  manage_employment: "مدیریت استخدام",
+  manage_permissions: "مدیریت دسترسی‌ها",
+  manage_deputies: "مدیریت معاونان مدرسه",
+  manage_schools: "مدیریت مدارس ناحیه",
+  manage_principals: "انتصاب مدیر مدرسه",
+  manage_district_staff: "مدیریت کارکنان ناحیه",
+  manage_employment_policy: "ویرایش سیاست استخدام",
+  manage_teacher_qualifications: "مدیریت صلاحیت معلم",
+};
+
 export const STATUS_ORDER = ["mastered", "consolidating", "weak", "critical", "unknown"] as const;
 
 export function fa(n: number | null | undefined, digits = 0): string {

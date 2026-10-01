@@ -63,6 +63,10 @@ const NAV: NavGroup[] = [
     ],
   },
   {
+    title: "ناحیه",
+    items: [{ href: "/district", label: "پنل مدیر ناحیه", icon: IconSchool, roles: ["district_admin"] }],
+  },
+  {
     title: "مدیریت",
     items: [
       { href: "/admin", label: "مدیریت مدرسه", icon: IconSchool, roles: ["school_admin", "district_admin"] },
