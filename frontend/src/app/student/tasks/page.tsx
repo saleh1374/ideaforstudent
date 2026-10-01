@@ -69,9 +69,14 @@ export default function TasksPage() {
           description="کارهای امروز بر اساس اولویت و وضعیت یادگیری شما چیده شده‌اند."
           crumbs={[{ label: "دانشیار" }, { label: "دانش‌آموز", href: "/student" }, { label: "برنامه امروز" }]}
           actions={
-            <ButtonLink href="/student" variant="ghost" size="sm" icon={<IconHome size={15} />}>
-              خانه
-            </ButtonLink>
+            <>
+              <ButtonLink href="/student/calendar" variant="soft" size="sm" icon={<IconClock size={15} />}>
+                تقویم دوره
+              </ButtonLink>
+              <ButtonLink href="/student" variant="ghost" size="sm" icon={<IconHome size={15} />}>
+                خانه
+              </ButtonLink>
+            </>
           }
         />
 

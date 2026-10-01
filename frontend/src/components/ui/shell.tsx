@@ -17,6 +17,7 @@ import {
   IconExam,
   IconFamily,
   IconHome,
+  IconLayers,
   IconLogout,
   IconMap,
   IconMenu,
@@ -80,6 +81,7 @@ const NAV: NavGroup[] = [
       { href: "/assistant", label: "دستیار هوشمند", icon: IconSparkles },
       { href: "/boards", label: "بردهای تحلیلی", icon: IconChart },
       { href: "/parent", label: "پنل والدین", icon: IconFamily, roles: ["parent"] },
+      { href: "/billing", label: "امور مالی", icon: IconLayers, roles: ["parent", "teacher"] },
     ],
   },
 ];

@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import admin, assistant, auth, boards, district, parent, public, stats, student, teacher, tutor
+from app.api import billing
 from app.core.config import get_settings
 from app.core.db import init_models
 
@@ -36,6 +37,7 @@ app.include_router(assistant.router)
 app.include_router(stats.router)
 app.include_router(district.router)
 app.include_router(tutor.router)
+app.include_router(billing.router)
 
 
 @app.get("/health")

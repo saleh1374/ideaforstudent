@@ -29,6 +29,9 @@ import { SchoolsSection } from "./schools-section";
 import { StaffSection } from "./staff-section";
 import { EmploymentSection } from "./employment-section";
 import { QualificationsSection } from "./qualifications-section";
+import { AdmissionsSection } from "./admissions-section";
+import { ExamsSection } from "./exams-section";
+import { InterventionsSection } from "./interventions-section";
 
 type Overview = {
   district: { id: number; name: string | null };
@@ -48,7 +51,15 @@ type Overview = {
   note_fa: string;
 };
 
-type Tab = "overview" | "schools" | "staff" | "employment" | "qualifications";
+type Tab =
+  | "overview"
+  | "schools"
+  | "staff"
+  | "employment"
+  | "qualifications"
+  | "admissions"
+  | "exams"
+  | "interventions";
 
 const STATUS_FA: Record<string, string> = {
   mastered: "مسلط",
@@ -160,6 +171,9 @@ export default function DistrictPage() {
             { key: "staff", label: "کارکنان ناحیه" },
             { key: "employment", label: "درخواست‌های استخدام" },
             { key: "qualifications", label: "صلاحیت معلم" },
+            { key: "exams", label: "آزمون‌های رسمی" },
+            { key: "interventions", label: "مداخله و مأموریت‌ها" },
+            { key: "admissions", label: "ثبت‌نام دانش‌آموزان" },
           ]}
           value={tab}
           onChange={(k) => setTab(k as Tab)}
@@ -260,6 +274,9 @@ export default function DistrictPage() {
         {tab === "staff" && <StaffSection />}
         {tab === "employment" && <EmploymentSection onChanged={loadOverview} />}
         {tab === "qualifications" && <QualificationsSection />}
+        {tab === "exams" && <ExamsSection />}
+        {tab === "interventions" && <InterventionsSection />}
+        {tab === "admissions" && <AdmissionsSection onChanged={loadOverview} />}
       </div>
     </AppShell>
   );

@@ -16,8 +16,12 @@ from app.core.passwords import hash_password
 from app.models.employment import EmploymentPolicyRule, EmploymentRequest
 from app.models.org import AdmissionRequest, ClassRoom, Employee, School, SchoolAssignment, StudentProfile, User
 from app.models.rbac import Deputy, Permission, Role
+from app.models.school_copilot import SchoolSuggestion
 from app.models.slm import StudentTopicState
 from app.services import admission as admission_svc
+from app.services import school as school_svc
+from app.services import school_copilot as copilot_svc
+from app.services import school_views
 from app.services.employment import decide_request, is_principal_of, submit_teacher_request
 from app.services.rbac_service import (
     check_delegation_scope,
@@ -32,7 +36,6 @@ from app.services.rbac_service import (
     user_scopes,
     visible_school_ids,
 )
-from app.services import school as school_svc
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -113,6 +116,49 @@ async def teacher_profiles_endpoint(
 ):
     """§4 نمایه سبک معلمان: شاخص عینی آموزشی + رفتاری، بدون امتیاز کل."""
     return await school_svc.teacher_lite_profiles(db, school_id)
+
+
+@router.get("/school/{school_id}/teachers-compare")
+async def teachers_compare_endpoint(
+    school_id: int,
+    subject: str = "math",
+    current: AuthUser = Depends(require_permission("view_school_analytics", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """§8 مقایسه معلم با معلم — با احتیاط: تسط/رشد/ماندگاری هر کلاس + عوامل
+    زمینه‌ای؛ بدون امتیاز کلی و با سرکوب حداقل جمعیت."""
+    if await db.get(School, school_id) is None:
+        raise HTTPException(404, "مدرسه یافت نشد")
+    return await school_views.teacher_comparison(db, school_id, subject)
+
+
+@router.get("/school/{school_id}/students")
+async def list_school_students_endpoint(
+    school_id: int,
+    current: AuthUser = Depends(require_permission("view_students", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """فهرست دانش‌آموزان مدرسه برای انتخابگر نمای فردی (§13)."""
+    if await db.get(School, school_id) is None:
+        raise HTTPException(404, "مدرسه یافت نشد")
+    return await school_views.list_students(db, school_id)
+
+
+@router.get("/school/{school_id}/students/{user_id}")
+async def school_student_detail_endpoint(
+    school_id: int,
+    user_id: int,
+    current: AuthUser = Depends(require_permission("view_students", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """§13 نمای فردی دانش‌آموز برای مدیر: تسط/ماندگاری/رتبه کلاسی/روند +
+    خطاها/مباحث بحرانی/تکمیل تمرین + مشکل اصلی + چرخه مداخله + آزمون‌های اخیر."""
+    if await db.get(School, school_id) is None:
+        raise HTTPException(404, "مدرسه یافت نشد")
+    try:
+        return await school_views.student_detail(db, school_id, user_id)
+    except LookupError:
+        raise HTTPException(404, "این دانش‌آموز در این مدرسه ثبت نشده است")
 
 
 @router.get("/classes/{class_id}/diagnosis")
@@ -1105,3 +1151,181 @@ async def create_student_direct(
         "school_id": class_room.school_id,
         "class_id": class_room.id,
     }
+
+
+# ------------------------- دستیار هوشمند مدیر مدرسه (§16 و §18) -------------------------
+
+
+class CopilotChatIn(BaseModel):
+    message: str
+    conversation_id: int | None = None
+
+
+@router.post("/school/{school_id}/copilot/chat")
+async def school_copilot_chat(
+    school_id: int,
+    body: CopilotChatIn,
+    current: AuthUser = Depends(require_permission("view_school_analytics", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """§16 پرسش/پاسخ تحلیلی مدیر روی داده تجمیعی همین مدرسه: تشخیص نیت →
+    بازیابی از تجمیع‌های واقعی → پاسخ با «منابع». بدون کش سراسری (پاسخ
+    حاوی داده اختصاصی مدرسه است — حریم خصوصی §20). هر پرسش با رویداد
+    school_copilot_query در لاگ ممیزی ثبت می‌شود."""
+    message = body.message.strip()
+    if not message:
+        raise HTTPException(400, "متن پرسش نمی‌تواند خالی باشد")
+    if await db.get(School, school_id) is None:
+        raise HTTPException(404, "مدرسه یافت نشد")
+
+    result = await copilot_svc.chat(
+        db,
+        school_id=school_id,
+        actor_user_id=current.id,
+        message=message,
+        conversation_id=body.conversation_id,
+    )
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="school_copilot_query",
+        entity_type="school",
+        entity_id=school_id,
+        detail=f"intent={result['intent']} conv={result['conversation_id']}",
+    )
+    await db.commit()
+    return result
+
+
+@router.get("/school/{school_id}/copilot/conversations")
+async def school_copilot_conversations(
+    school_id: int,
+    current: AuthUser = Depends(require_permission("view_school_analytics", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """فهرست گفت‌وگوهای قبلی مدیر با کوپایلت (فقط همین مدرسه)."""
+    if await db.get(School, school_id) is None:
+        raise HTTPException(404, "مدرسه یافت نشد")
+    return {"conversations": await copilot_svc.list_conversations(db, school_id)}
+
+
+@router.get("/school/{school_id}/copilot/conversations/{conversation_id}")
+async def school_copilot_conversation_detail(
+    school_id: int,
+    conversation_id: int,
+    current: AuthUser = Depends(require_permission("view_school_analytics", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """پیام‌های یک گفت‌وگو — گفت‌وگوی مدرسه دیگر یا ناشناس → 404."""
+    if await db.get(School, school_id) is None:
+        raise HTTPException(404, "مدرسه یافت نشد")
+    data = await copilot_svc.conversation_messages(db, school_id, conversation_id)
+    if data is None:
+        raise HTTPException(404, "گفت‌وگو یافت نشد")
+    return data
+
+
+def _suggestion_row(s: SchoolSuggestion) -> dict:
+    return {
+        "id": s.id,
+        "school_id": s.school_id,
+        "class_id": s.class_id,
+        "subject": s.subject,
+        "title_fa": s.title_fa,
+        "evidence_fa": s.evidence_fa,
+        "actions_fa": list(s.actions_fa or []),
+        "status": s.status,
+        "final_actions_fa": list(s.final_actions_fa) if s.final_actions_fa else None,
+        "decided_by": s.decided_by,
+        "decided_at": s.decided_at,
+        "decision_note": s.decision_note,
+        "created_at": s.created_at,
+    }
+
+
+@router.get("/school/{school_id}/suggestions")
+async def list_school_suggestions(
+    school_id: int,
+    status: str | None = None,
+    current: AuthUser = Depends(require_permission("view_school_analytics", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """§18 پیشنهادهای اقدام مدرسه — «ساخته‌شده توسط سیستم، اجراشده فقط با
+    تصمیم مدیر». فیلتر وضعیت اختیاری (proposed|approved|edited|rejected)."""
+    if status is not None and status not in ("proposed", "approved", "edited", "rejected"):
+        raise HTTPException(400, "وضعیت نامعتبر است")
+    if await db.get(School, school_id) is None:
+        raise HTTPException(404, "مدرسه یافت نشد")
+    q = select(SchoolSuggestion).where(SchoolSuggestion.school_id == school_id)
+    if status is not None:
+        q = q.where(SchoolSuggestion.status == status)
+    rows = (await db.execute(q.order_by(SchoolSuggestion.id.desc()))).scalars().all()
+    return {"suggestions": [_suggestion_row(s) for s in rows]}
+
+
+@router.post("/school/{school_id}/suggestions/generate")
+async def generate_school_suggestions(
+    school_id: int,
+    current: AuthUser = Depends(require_permission("view_school_analytics", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """ساخت پیشنهاد اقدام از پرچم‌های §5 + کلاس‌های دارای افت — idempotent:
+    تا وقتی پیشنهاد بازِ همان عنوان هست، چیزی دوباره ساخته نمی‌شود."""
+    if await db.get(School, school_id) is None:
+        raise HTTPException(404, "مدرسه یافت نشد")
+    created = await copilot_svc.generate_suggestions(db, school_id)
+    await db.commit()
+    return {"ok": True, "created": len(created), "suggestions": [_suggestion_row(s) for s in created]}
+
+
+class SuggestionDecisionIn(BaseModel):
+    action: str  # approve | edit | reject
+    edited_actions: list[str] | None = None
+    note: str | None = None
+
+
+@router.post("/school/{school_id}/suggestions/{suggestion_id}/decide")
+async def decide_school_suggestion(
+    school_id: int,
+    suggestion_id: int,
+    body: SuggestionDecisionIn,
+    current: AuthUser = Depends(require_permission("view_school_analytics", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """§18 اختیار کامل مدیر: تأیید، ویرایش یا رد پیشنهاد — با رویداد
+    ممیزی school_suggestion_approved/edited/rejected. خارج از مدرسه → 404؛
+    تصمیم تکراری → 409؛ عملیات نامعتبر → 400."""
+    if body.action not in ("approve", "edit", "reject"):
+        raise HTTPException(400, "عملیات نامعتبر است (approve|edit|reject)")
+    if await db.get(School, school_id) is None:
+        raise HTTPException(404, "مدرسه یافت نشد")
+    try:
+        sugg = await copilot_svc.decide_suggestion(
+            db,
+            school_id=school_id,
+            suggestion_id=suggestion_id,
+            actor_user_id=current.id,
+            action=body.action,
+            edited_actions=body.edited_actions,
+            note=body.note,
+        )
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(409, str(exc))
+    if sugg is None:
+        raise HTTPException(404, "پیشنهاد یافت نشد")
+
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action={
+            "approve": "school_suggestion_approved",
+            "edit": "school_suggestion_edited",
+            "reject": "school_suggestion_rejected",
+        }[body.action],
+        entity_type="school_suggestion",
+        entity_id=sugg.id,
+        detail=f"school={school_id} note={body.note or ''}",
+    )
+    await db.commit()
+    return {"ok": True, "suggestion": _suggestion_row(sugg)}

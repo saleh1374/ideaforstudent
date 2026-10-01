@@ -1,7 +1,8 @@
-"""District admin APIs (district spec §1-§4, §12, §15): مدارس ناحیه، ثبت
-مدرسه، تغییر وضعیت/مدیر مدرسه، کارکنان ناحیه، نمای کلان و درخواست‌های
- استخدام — همه محدود به District Scope تماس‌گیرنده (§33)."""
-from datetime import date
+"""District admin APIs (district spec §1-§4, §12, §15, §20-§21, §25-§27): مدارس
+ناحیه، ثبت مدرسه، تغییر وضعیت/مدیر مدرسه، کارکنان ناحیه، نمای کلان، درخواست‌های
+ استخدام، آزمون‌های رسمی ناحیه + تحلیل سؤال، مداخله آموزشی و مأموریت مدارس —
+همه محدود به District Scope تماس‌گیرنده (§33)."""
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -12,10 +13,12 @@ from app.api.deps import AuthUser, get_current_user, require_permission
 from app.core.db import get_db
 from app.core.passwords import hash_password
 from app.models.employment import EmploymentRequest
+from app.models.district_exams import DistrictExam  # noqa: F401  (register tables)
 from app.models.org import District, Employee, Employment, School, SchoolAssignment, User
 from app.models.rbac import Permission, Role, RolePermission
 from app.models.teacher_assessment import TeacherIntervention
 from app.services import district as district_svc
+from app.services import district_exams as de_svc
 from app.services import teacher_qualification as tq_svc
 from app.services.rbac_service import (
     check_delegation_scope,
@@ -577,3 +580,277 @@ async def set_intervention_status(
     row = await tq_svc.update_intervention_status(db, row, body.status)
     await db.commit()
     return {"ok": True, "intervention": tq_svc.intervention_row(row)}
+
+
+# ------------- آزمون‌های رسمی ناحیه / مداخله / مأموریت (§20–§21, §25–§27) -------------
+#
+# مجوز خواندن: view_district_analytics (مانند بقیه نمای‌های ناحیه).
+# مجوز نوشتن: کلید create_exam از قبل به نقش district_admin در حوزه ناحیه
+# تخصیص دارد (scripts/seed.py — فایل مشترک و دست‌نخورده)؛ افزودن کلید مجوز
+# تازه نیازمند ویرایش seed مشترک است، پس از همان کلید استفاده می‌شود.
+DISTRICT_EXAM_VIEW_PERM = "view_district_analytics"
+DISTRICT_EXAM_MANAGE_PERM = "create_exam"
+
+
+class DistrictExamIn(BaseModel):
+    title_fa: str
+    grade: str
+    subject: str
+    school_ids: list[int]
+    blueprint: str | None = None
+    opens_at: datetime | None = None
+    closes_at: datetime | None = None
+    item_ids: list[int] | None = None       # سؤال صریح از بانک (خالی → نمونه خودکار)
+    item_count: int | None = None           # تعداد نمونه خودکار از بانک
+
+
+class DistrictExamStatusIn(BaseModel):
+    status: str  # draft | published | graded | closed
+
+
+class InterventionIn(BaseModel):
+    title_fa: str
+    type: str  # course | supervision | replacement | program
+    school_ids: list[int]
+    topic_id: int | None = None
+    grade: str | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    before_mastery: float | None = None
+    notes: str | None = None
+
+
+class InterventionPatchIn(BaseModel):
+    stage: str | None = None      # after | retention
+    mastery: float | None = None
+    status: str | None = None     # active | closed | cancelled
+    notes: str | None = None
+
+
+class MissionIn(BaseModel):
+    title_fa: str
+    goal: str
+    topic_id: int
+    target_mastery: float
+    school_ids: list[int]
+    deadline: date | None = None  # پیش‌فرض ~۲ هفته
+
+
+@router.get("/topics")
+async def district_topics(
+    district_id: int = Depends(district_scope(DISTRICT_EXAM_VIEW_PERM)),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """گزینه‌های مبحث کاتالوگ (برای فرم‌های مداخله/مأموریت/سرفصل آزمون)."""
+    return {"district_id": district_id, "topics": await de_svc.topics_options(db)}
+
+
+@router.post("/exams")
+async def create_official_exam(
+    body: DistrictExamIn,
+    district_id: int = Depends(district_scope(DISTRICT_EXAM_MANAGE_PERM)),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """ساخت آزمون رسمی ناحیه (§20): پایه + درس + سرفصل + زمان‌بندی +
+    مدارس انتخابی + اقلام سؤال — در وضعیت پیش‌نویس با رویداد ممیزی."""
+    exam = await de_svc.create_district_exam(
+        db,
+        district_id=district_id,
+        created_by=current.id,
+        title_fa=body.title_fa,
+        grade=body.grade,
+        subject=body.subject,
+        school_ids=body.school_ids,
+        blueprint=body.blueprint,
+        opens_at=body.opens_at,
+        closes_at=body.closes_at,
+        item_ids=body.item_ids,
+        item_count=body.item_count,
+    )
+    await db.commit()
+    return {"ok": True, "exam": await de_svc.district_exam_detail(db, exam)}
+
+
+@router.get("/exams")
+async def list_official_exams(
+    status: str | None = None,
+    district_id: int = Depends(district_scope(DISTRICT_EXAM_VIEW_PERM)),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """فهرست آزمون‌های رسمی ناحیه (فیلتر اختیاری وضعیت)."""
+    rows = await de_svc.list_district_exams(db, district_id, status=status)
+    return {"district_id": district_id, "total": len(rows), "exams": rows}
+
+
+@router.get("/exams/{exam_id}")
+async def official_exam_detail(
+    exam_id: int,
+    district_id: int = Depends(district_scope(DISTRICT_EXAM_VIEW_PERM)),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """جزئیات آزمون رسمی: مدارس + اقلام سؤال + شرکت‌کنندگان + گذارهای مجاز."""
+    exam = await de_svc.district_exam_or_404(db, exam_id, district_id)
+    return {"exam": await de_svc.district_exam_detail(db, exam)}
+
+
+@router.patch("/exams/{exam_id}/status")
+async def change_official_exam_status(
+    exam_id: int,
+    body: DistrictExamStatusIn,
+    district_id: int = Depends(district_scope(DISTRICT_EXAM_MANAGE_PERM)),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """گذار وضعیت آزمون رسمی (draft → published → graded → closed) با ثبت
+    ممیزی صریح انتشار — «کسی آزمون رسمی را منتشر کرد؟» (§20)."""
+    exam = await de_svc.district_exam_or_404(db, exam_id, district_id)
+    exam = await de_svc.set_exam_status(db, exam, body.status, current.id)
+    await db.commit()
+    return {"ok": True, "exam": await de_svc.district_exam_detail(db, exam)}
+
+
+@router.get("/exams/{exam_id}/results")
+async def official_exam_results(
+    exam_id: int,
+    district_id: int = Depends(district_scope(DISTRICT_EXAM_VIEW_PERM)),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """نتایج آزمون رسمی به تفکیک مدرسه/کلاس — با سرکوب حداقل جمعیت (§20/§3)."""
+    exam = await de_svc.district_exam_or_404(db, exam_id, district_id)
+    return await de_svc.exam_results(db, exam)
+
+
+@router.get("/exams/{exam_id}/item-analysis")
+async def official_exam_item_analysis(
+    exam_id: int,
+    district_id: int = Depends(district_scope(DISTRICT_EXAM_VIEW_PERM)),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """تحلیل سؤال‌های آزمون (§21): درصد پاسخ صحیح، دشواری تجربی، قدرت
+    تفکیک، پرتکرارترین گزینه غلط + کج‌فهمی و علامت «نیازمند بازبینی»."""
+    exam = await de_svc.district_exam_or_404(db, exam_id, district_id)
+    return await de_svc.item_analysis(db, exam)
+
+
+# ------------------------- §25–§26 مداخله آموزشی -------------------------
+
+
+@router.post("/interventions")
+async def create_district_intervention(
+    body: InterventionIn,
+    district_id: int = Depends(district_scope(DISTRICT_EXAM_MANAGE_PERM)),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """ثبت مداخله آموزشی ناحیه با هدف/نوع/مدارس و اندازه‌گیری «پیش از
+    مداخله» (خودکار از تجمیع تسط، یا مقدار صریح)."""
+    iv = await de_svc.create_intervention(
+        db,
+        district_id=district_id,
+        created_by=current.id,
+        title_fa=body.title_fa,
+        type=body.type,
+        school_ids=body.school_ids,
+        topic_id=body.topic_id,
+        grade=body.grade,
+        start_date=body.start_date,
+        end_date=body.end_date,
+        before_mastery=body.before_mastery,
+        notes=body.notes,
+    )
+    await db.commit()
+    rows = [r for r in await de_svc.list_interventions(db, district_id) if r["id"] == iv.id]
+    return {"ok": True, "intervention": rows[0] if rows else None}
+
+
+@router.get("/interventions")
+async def list_district_interventions(
+    district_id: int = Depends(district_scope(DISTRICT_EXAM_VIEW_PERM)),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """فهرست مداخله‌ها با «سنجش اثر مداخله» (§26)."""
+    rows = await de_svc.list_interventions(db, district_id)
+    return {"district_id": district_id, "total": len(rows), "interventions": rows}
+
+
+@router.patch("/interventions/{intervention_id}")
+async def update_district_intervention(
+    intervention_id: int,
+    body: InterventionPatchIn,
+    district_id: int = Depends(district_scope(DISTRICT_EXAM_MANAGE_PERM)),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """ثبت مرحله اندازه‌گیری (after/retention) و/یا بستن مداخله — با ممیزی."""
+    iv = await de_svc.intervention_or_404(db, intervention_id, district_id)
+    if body.stage is not None or body.mastery is not None:
+        if body.stage is None or body.mastery is None:
+            raise HTTPException(400, "برای ثبت اندازه‌گیری، stage و mastery هر دو لازم است")
+        iv = await de_svc.record_intervention_measurement(
+            db, iv, stage=body.stage, mastery=body.mastery, actor_id=current.id
+        )
+    if body.status is not None:
+        iv = await de_svc.set_intervention_status(db, iv, body.status, current.id)
+    if body.notes is not None:
+        iv.notes = body.notes.strip() or None
+        await db.flush()
+    await db.commit()
+    rows = [r for r in await de_svc.list_interventions(db, district_id) if r["id"] == iv.id]
+    return {"ok": True, "intervention": rows[0] if rows else None}
+
+
+# ------------------------- §27 مأموریت برای مدارس -------------------------
+
+
+@router.post("/missions")
+async def create_district_mission(
+    body: MissionIn,
+    district_id: int = Depends(district_scope(DISTRICT_EXAM_MANAGE_PERM)),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """تعریف مأموریت آموزشی برای گروهی از مدارس: هدف مشخص + مبحث + آستانه
+    تسط + مهلت (پیش‌فرض ~۲ هفته) — سازنده در ممیزی ثبت می‌شود."""
+    mission = await de_svc.create_mission(
+        db,
+        district_id=district_id,
+        created_by=current.id,
+        title_fa=body.title_fa,
+        goal=body.goal,
+        topic_id=body.topic_id,
+        target_mastery=body.target_mastery,
+        school_ids=body.school_ids,
+        deadline=body.deadline,
+    )
+    await db.commit()
+    return {"ok": True, "mission": await de_svc.mission_progress(db, mission)}
+
+
+@router.get("/missions")
+async def list_district_missions(
+    district_id: int = Depends(district_scope(DISTRICT_EXAM_VIEW_PERM)),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """فهرست مأموریت‌ها با وضعیت کلی و شمارش پیشرفت مدارس."""
+    rows = await de_svc.list_missions(db, district_id)
+    return {"district_id": district_id, "total": len(rows), "missions": rows}
+
+
+@router.get("/missions/{mission_id}")
+async def district_mission_detail(
+    mission_id: int,
+    district_id: int = Depends(district_scope(DISTRICT_EXAM_VIEW_PERM)),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """داشبورد پیشرفت یک مأموریت: تسط هر مدرسه نسبت به هدف (با سرکوب)."""
+    mission = await de_svc.mission_or_404(db, mission_id, district_id)
+    return {"mission": await de_svc.mission_progress(db, mission)}

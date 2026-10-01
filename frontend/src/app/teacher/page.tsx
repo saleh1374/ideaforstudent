@@ -17,6 +17,9 @@ import { BarChart, DonutChart } from "@/components/ui/charts";
 import { toast } from "@/components/ui/toast";
 import { IconAlert, IconChart, IconLayers, IconTarget, IconUsers } from "@/components/ui/icons";
 import { AssessmentSection } from "./assessment-section";
+import { ExamBuilderSection } from "./exam-builder-section";
+import { ExamAnalysisSection } from "./exam-analysis-section";
+import { CopilotSection } from "./copilot-section";
 
 type ClassInfo = {
   class_id: number;
@@ -64,7 +67,7 @@ type Group = {
 };
 
 export default function TeacherPage() {
-  const [view, setView] = useState<"class" | "assessment">("class");
+  const [view, setView] = useState<"class" | "assessment" | "builder" | "analysis" | "copilot">("class");
   const [classes, setClasses] = useState<ClassInfo[]>([]);
   const [activeClass, setActiveClass] = useState<number | null>(null);
   const [radar, setRadar] = useState<RadarRow[]>([]);
@@ -230,12 +233,21 @@ export default function TeacherPage() {
           items={[
             { key: "class", label: "هوش کلاس", count: classes.length },
             { key: "assessment", label: "ارزیابی صلاحیت" },
+            { key: "builder", label: "سازنده آزمون" },
+            { key: "analysis", label: "تحلیل آزمون" },
+            { key: "copilot", label: "دستیار هوشمند" },
           ]}
           value={view}
-          onChange={(k) => setView(k as "class" | "assessment")}
+          onChange={(k) => setView(k as "class" | "assessment" | "builder" | "analysis" | "copilot")}
         />
 
         {view === "assessment" && <AssessmentSection />}
+
+        {view === "builder" && <ExamBuilderSection />}
+
+        {view === "analysis" && <ExamAnalysisSection />}
+
+        {view === "copilot" && <CopilotSection classId={activeClass} />}
 
         {view === "class" && msg && classes.length === 0 && <Alert variant="danger" title="خطا">{msg}</Alert>}
 

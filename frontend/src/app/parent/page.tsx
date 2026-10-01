@@ -15,8 +15,15 @@ import { ProgressBar } from "@/components/ui/progress";
 import { DonutChart, RadialProgress } from "@/components/ui/charts";
 import { SkeletonCard, SkeletonStats } from "@/components/ui/skeleton";
 import { IconAlert, IconFamily, IconTarget, IconTrend } from "@/components/ui/icons";
+import { ExamResultsSection } from "./exam-results-section";
+import { PlanSection } from "./plan-section";
+import { AlertsSection } from "./alerts-section";
+import { WeeklyReportSection } from "./weekly-report-section";
 
 type Child = { id: number; full_name: string; grade: string | null; class_id: number | null };
+
+const SECTION_KEYS = ["overview", "exams", "plan", "alerts", "weekly"] as const;
+type SectionKey = (typeof SECTION_KEYS)[number];
 
 type Overview = {
   student_id: number;
@@ -43,6 +50,7 @@ export default function ParentPage() {
   const [children, setChildren] = useState<Child[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [ov, setOv] = useState<Overview | null>(null);
+  const [section, setSection] = useState<SectionKey>("overview");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -107,7 +115,27 @@ export default function ParentPage() {
           />
         )}
 
-        {!ov && selected !== null && (
+        {/* report sections — سند پنل والدین §3/§6/§8/§13/§14 */}
+        {selected !== null && (
+          <Tabs
+            items={[
+              { key: "overview", label: "نمای کلی" },
+              { key: "exams", label: "نمرات آزمون‌ها" },
+              { key: "plan", label: "برنامه و تکالیف" },
+              { key: "alerts", label: "هشدارها" },
+              { key: "weekly", label: "گزارش هفتگی" },
+            ]}
+            value={section}
+            onChange={(k) => setSection(k as SectionKey)}
+          />
+        )}
+
+        {selected !== null && section === "exams" && <ExamResultsSection childId={selected} />}
+        {selected !== null && section === "plan" && <PlanSection childId={selected} />}
+        {selected !== null && section === "alerts" && <AlertsSection childId={selected} />}
+        {selected !== null && section === "weekly" && <WeeklyReportSection childId={selected} />}
+
+        {section === "overview" && !ov && selected !== null && (
           <div className="space-y-5">
             <SkeletonStats count={3} />
             <div className="grid gap-5 lg:grid-cols-2">
@@ -117,7 +145,7 @@ export default function ParentPage() {
           </div>
         )}
 
-        {ov && (
+        {section === "overview" && ov && (
           <>
             {/* KPIs */}
             <section className="grid grid-cols-1 gap-4 sm:grid-cols-3">

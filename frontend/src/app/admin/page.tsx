@@ -29,6 +29,9 @@ import {
 } from "@/components/ui/icons";
 import { EmploymentSection } from "./employment-section";
 import { AdmissionsSection } from "./admissions-section";
+import { TeachersCompareSection } from "./teachers-compare-section";
+import { StudentViewSection } from "./student-view-section";
+import { SchoolCopilotSection } from "./school-copilot-section";
 
 type Overview = {
   school: { id: number; name: string; type: string; ownership: string };
@@ -101,7 +104,7 @@ const FLAG_STYLE: Record<string, string> = {
   low_platform_usage: "bg-slate-100 text-ink-muted",
 };
 
-type Tab = "compare" | "flags" | "teachers" | "admissions";
+type Tab = "compare" | "flags" | "teachers" | "admissions" | "teachercmp" | "students" | "copilot";
 
 export default function AdminPage() {
   const [tab, setTab] = useState<Tab>("compare");
@@ -336,6 +339,9 @@ export default function AdminPage() {
                 { key: "flags", label: "نیازمند بررسی", count: flags.length },
                 { key: "teachers", label: "نمایه معلمان", count: profiles.length },
                 { key: "admissions", label: "ثبت‌نام دانش‌آموزان" },
+                { key: "teachercmp", label: "مقایسه معلمان" },
+                { key: "students", label: "نمای فردی دانش‌آموز" },
+                { key: "copilot", label: "دستیار هوشمند" },
               ]}
               value={tab}
               onChange={(k) => setTab(k as Tab)}
@@ -408,6 +414,15 @@ export default function AdminPage() {
 
             {/* ثبت‌نام دانش‌آموزان */}
             {tab === "admissions" && <AdmissionsSection schoolId={ov?.school.id ?? null} />}
+
+            {/* §8 مقایسه معلم با معلم — با احتیاط */}
+            {tab === "teachercmp" && <TeachersCompareSection schoolId={ov?.school.id ?? null} />}
+
+            {/* §13 نمای فردی دانش‌آموز */}
+            {tab === "students" && <StudentViewSection schoolId={ov?.school.id ?? null} />}
+
+            {/* §16/§18 دستیار هوشمند مدیر مدرسه */}
+            {tab === "copilot" && <SchoolCopilotSection schoolId={ov?.school.id ?? null} />}
 
             {/* §6 تشخیص چندعاملی */}
             <Modal

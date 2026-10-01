@@ -1,7 +1,7 @@
 """Student panel APIs (student spec §7, §3.3, §5, §6, §4.3)."""
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,7 @@ from app.models.assessment import AttemptAnswer, Exam, ExamAttempt, ExamItem
 from app.models.catalog import Book, Chapter, Period, Topic
 from app.models.org import StudentProfile
 from app.models.slm import ErrorRecord, PlanTask, StudentTopicState
+from app.services import student_plan
 from app.services.assessment import submit_attempt
 from app.services.remediation import apply_retest_result, build_retest_exam, weak_topics_with_open_errors
 
@@ -323,3 +324,58 @@ async def complete_task(task_id: int, body: TaskDoneIn, current: AuthUser = Depe
     task.minicheck_passed = 1 if body.minicheck_passed else 0
     await db.commit()
     return {"ok": True}
+
+
+def _parse_day(value: str | None, name: str) -> date | None:
+    """پارامتر تاریخ ISO (YYYY-MM-DD)؛ نامعتبر ⇒ 400 با پیام فارسی."""
+    if value is None or value == "":
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(400, f"تاریخ نامعتبر برای پارامتر «{name}» (قالب YYYY-MM-DD)")
+
+
+@router.get("/calendar")
+async def calendar(
+    from_date: str | None = Query(None, alias="from", description="تاریخ شروع بازه (YYYY-MM-DD)"),
+    to_date: str | None = Query(None, alias="to", description="تاریخ پایان بازه (YYYY-MM-DD)"),
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """تقویم / برنامه دوره‌ای (§4 «تقویم آموزشی و چرخه دوهفته‌ای» + §13 «دوره جاری»).
+
+    گروه‌بندی به تفکیک روز با رویدادهای kind ∈ task/exam/period/retest/mission؛
+    هایلایت: امروز، سررسید گذشته (overdue) و سررسید تا ۴۸ ساعت آینده (soon)."""
+    start = _parse_day(from_date, "from") or date.today()
+    end = _parse_day(to_date, "to") or (start + timedelta(days=student_plan.CALENDAR_DEFAULT_DAYS - 1))
+    if end < start:
+        raise HTTPException(400, "تاریخ پایان بازه باید بعد از تاریخ شروع باشد")
+    if (end - start).days + 1 > student_plan.CALENDAR_MAX_DAYS:
+        raise HTTPException(
+            400,
+            f"بازه تقویم حداکثر {student_plan.fa_num(student_plan.CALENDAR_MAX_DAYS)} روز است",
+        )
+    return await student_plan.build_calendar(db, current.id, start, end)
+
+
+@router.get("/exam-history")
+async def exam_history(current: AuthUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """تاریخچه تحلیلی آزمون (§7 + §13 «تحلیل و کارنامه»): هر تلاش با نمره،
+    ترکیب صحیح/غلط/نزده، نمره منفی، زمان، تغییر نسبت به تلاش قبلیِ همان آزمون،
+    وضعیت تسط مباحث و خطاهای ثبت‌شده/رفع‌شده — فقط تلاش‌های خود دانش‌آموز."""
+    return await student_plan.exam_history(db, current.id)
+
+
+@router.get("/exam-history/{attempt_id}")
+async def exam_attempt_review(
+    attempt_id: int,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """مرور تک‌تلاش: سؤال‌به‌سؤال (پاسخ من، پاسخ صحیح، علت خطا از ۶ علت) +
+    دلتای تسط مبحث‌ها قبل/بعد از آزمون. متعلق به دانش‌آموز دیگر ⇒ 404."""
+    detail = await student_plan.attempt_detail(db, current.id, attempt_id)
+    if detail is None:
+        raise HTTPException(404, "تلاش آزمون یافت نشد")
+    return detail

@@ -19,6 +19,7 @@ import {
   IconBook,
   IconCheckCircle,
   IconChart,
+  IconClock,
   IconExam,
   IconSparkles,
   IconTarget,
@@ -36,6 +37,7 @@ const STATUS_SEG_COLOR: Record<string, string> = {
 
 const QUICK_LINKS = [
   { href: "/student/tasks", label: "برنامه امروز", icon: IconTasks },
+  { href: "/student/calendar", label: "تقویم دوره", icon: IconClock },
   { href: "/student/books", label: "کتاب‌های من", icon: IconBook },
   { href: "/student/errors", label: "دفترچه خطا", icon: IconAlert },
   { href: "/student/exams", label: "آزمون‌ها", icon: IconExam },
