@@ -9,7 +9,19 @@ const DEMO_USERS = [
   { u: "teacher1", label: "معلم" },
   { u: "schooladmin", label: "مدیر مدرسه" },
   { u: "districtadmin", label: "مدیر ناحیه" },
+  { u: "parent1", label: "والد" },
+  { u: "provinceadmin", label: "مدیر استان" },
+  { u: "ministry", label: "وزارت" },
+  { u: "tutor1", label: "معلم خصوصی" },
 ];
+
+const HOME: Record<string, string> = {
+  student: "/student",
+  teacher: "/teacher",
+  parent: "/parent",
+  province_admin: "/geo",
+  ministry: "/geo",
+};
 
 export default function LoginPage() {
   const router = useRouter();
@@ -24,9 +36,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const data = await login(username, password);
-      if (data.user.role === "student") router.push("/student");
-      else if (data.user.role === "teacher") router.push("/teacher");
-      else router.push("/admin");
+      router.push(HOME[data.user.role] ?? "/admin");
     } catch (err) {
       setError(err instanceof Error ? err.message : "خطا در ورود");
     } finally {
@@ -59,11 +69,10 @@ export default function LoginPage() {
 
         <div className="space-y-2">
           <p className="text-xs text-slate-400">کاربرهای نمونه (رمز همه: pass123):</p>
-          <div className="flex gap-2">
-            {DEMO_USERS.map((d) => (
-              <button
-                key={d.u}
-                className="btn-ghost text-xs flex-1"
+          <div className="flex flex-wrap gap-2">
+            {DEMO_USERS.map((d) => (                <button
+                  key={d.u}
+                  className="btn-ghost text-xs flex-1 min-w-[7rem]"
                 onClick={() => {
                   setUsername(d.u);
                   setPassword("pass123");

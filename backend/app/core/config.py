@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     # Privacy
     min_group_size: int = 10             # stats suppressed below this (spec §8.2)
 
+    # Remediation / targeted retest (roadmap phase 4)
+    retest_items_per_topic: int = 2      # سؤالات هر مبحث در بازآزمون ترمیمی
+    retest_close_days: int = 7           # مهلت بازآزمون
+    retest_pass_ratio: float = 0.75      # نسبت پاسخ درست هر مبحث برای «رفع خطا»
+
+    # AI assistant (roadmap phase 6)
+    assistant_cache_similarity: float = 0.85   # آستانه شباهت کش معنایی (Jaccard)
+    assistant_evidence_weight: float = 0.15    # وزن شاهد ai_chat در SLM
+    assistant_max_sources: int = 5
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

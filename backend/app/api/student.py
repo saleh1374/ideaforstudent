@@ -16,6 +16,7 @@ from app.models.catalog import Book, Chapter, Period, Topic
 from app.models.org import StudentProfile
 from app.models.slm import ErrorRecord, PlanTask, StudentTopicState
 from app.services.assessment import submit_attempt
+from app.services.remediation import apply_retest_result, build_retest_exam, weak_topics_with_open_errors
 
 router = APIRouter(prefix="/student", tags=["student"])
 
@@ -226,6 +227,36 @@ async def submit_exam(exam_id: int, body: SubmitIn, current: AuthUser = Depends(
         raise HTTPException(400, "ابتدا آزمون را شروع کنید")
 
     result = await submit_attempt(db, exam=exam, attempt=attempt, answers=[a.model_dump() for a in body.answers])
+
+    # چرخه ترمیم/بازآزمون (فاز ۴): نتیجه بازآزمون، وضعیت دفترچه خطا را جابه‌جا می‌کند
+    if exam.exam_type == "remedial_retest":
+        attempt_answers = (
+            await db.execute(select(AttemptAnswer).where(AttemptAnswer.attempt_id == attempt.id))
+        ).scalars().all()
+        result["remediation"] = await apply_retest_result(
+            db, student_user_id=current.id, attempt=attempt, answers=attempt_answers
+        )
+
+    await db.commit()
+    return result
+
+
+@router.get("/retest/plan")
+async def retest_plan(current: AuthUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """برنامه بازآزمون ترمیمی: مباحث دارای خطای باز + دکمه ساخت آزمون (فاز ۴)."""
+    targets = await weak_topics_with_open_errors(db, current.id)
+    return {
+        "targets": targets,
+        "can_build": bool(targets),
+        "note_fa": "بازآزمون ترمیمی فقط از مباحث دارای خطای باز ساخته می‌شود؛ پاسخ درست ⇒ رفع خطا، نادرست ⇒ بازگشت خطا.",
+    }
+
+
+@router.post("/retest/build")
+async def retest_build(current: AuthUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await build_retest_exam(db, current.id)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("reason"))
     await db.commit()
     return result
 

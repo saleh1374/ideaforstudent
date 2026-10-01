@@ -114,6 +114,7 @@ EVIDENCE_WEIGHTS = {
     "cumulative": 1.0,
     "quiz": 0.7,
     "retest": 0.8,
+    "remedial_retest": 0.8,
     "practice": 0.5,
     "ai_chat": 0.15,
     "self_report": 0.05,

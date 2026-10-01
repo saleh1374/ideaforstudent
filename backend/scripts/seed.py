@@ -13,6 +13,7 @@ from app.models.employment import EmploymentPolicyRule
 from app.models.org import (
     ClassRoom,
     District,
+    ParentLink,
     Province,
     School,
     StudentProfile,
@@ -45,6 +46,21 @@ async def seed(db: AsyncSession) -> None:
     db.add(cls2)
     await db.flush()
 
+    # ---------- مدرسه دوم (برای بردها/تجمیع‌های استان — حداقل جمعیت ۱۰) ----------
+    school2 = School(
+        district_id=dist.id,
+        province_id=prov.id,
+        name="دبیرستان دانش‌سرای شهر",
+        school_code="S-1002",
+        school_type="high_school",
+        ownership_type="non_profit",
+    )
+    db.add(school2)
+    await db.flush()
+    cls3 = ClassRoom(school_id=school2.id, grade="grade_10", track="math", name="۲۰۱", capacity=30)
+    db.add(cls3)
+    await db.flush()
+
     # ---------- users ----------
     def mk_user(u, name, role):
         usr = User(username=u, password_hash=hash_password("pass123"), full_name=name, system_role=role)
@@ -61,6 +77,12 @@ async def seed(db: AsyncSession) -> None:
     student4 = mk_user("student4", "رضا نادری", "student")
     student5 = mk_user("student5", "مریم توکلی", "student")
     new_teacher = mk_user("newteacher", "خانم صادقی", "teacher")
+    parent1 = mk_user("parent1", "پدر محمد رضایی", "parent")
+    province_admin = mk_user("provinceadmin", "مدیر کل استان", "province_admin")
+    ministry_user = mk_user("ministry", "کارشناس وزارت", "ministry")
+    tutor_user = mk_user("tutor1", "معلم خصوصی ریاضی", "teacher")
+    # ۱۰ دانش‌آموز مدرسه دوم — تا برد/تجمیع بالای حداقل جمعیت ۱۰ برود
+    school2_students = [mk_user(f"s2student{i}", f"دانش‌آموز مدرسه ۲ — {i}", "student") for i in range(1, 11)]
     await db.flush()
 
     db.add_all(
@@ -72,6 +94,15 @@ async def seed(db: AsyncSession) -> None:
             StudentProfile(user_id=student5.id, grade="grade_10", track="experimental", school_id=school.id, class_id=cls2.id),
         ]
     )
+    db.add_all(
+        [
+            StudentProfile(user_id=s.id, grade="grade_10", track="math", school_id=school2.id, class_id=cls3.id)
+            for s in school2_students
+        ]
+    )
+
+    # ---------- پیوند والد — فرزند (سند والدین §17) ----------
+    db.add(ParentLink(parent_user_id=parent1.id, student_user_id=student.id, relation="father"))
 
     # ---------- RBAC ----------
     perm_defs = [
@@ -98,6 +129,20 @@ async def seed(db: AsyncSession) -> None:
         db.add(RolePermission(role_id=role_admin.id, permission_id=p.id))
     for p in perm_objs.values():
         db.add(RolePermission(role_id=role_district.id, permission_id=p.id))
+    await db.flush()
+
+    # ---------- مجوزهای استان/وزارت (جدا از سطح مدرسه/ناحیه) ----------
+    perm_province = Permission(key="view_province_analytics", title_fa="مشاهده تحلیل استان")
+    perm_national = Permission(key="view_national_analytics", title_fa="مشاهده تحلیل کشور")
+    db.add_all([perm_province, perm_national])
+    role_province = Role(key="province_admin", title_fa="مدیر کل استان")
+    role_ministry = Role(key="ministry", title_fa="وزارت")
+    db.add_all([role_province, role_ministry])
+    await db.flush()
+    # استان: تحلیل استان + کشور (رقابت سالم بین استان‌ها)؛ وزارت: هر دو
+    for p in (perm_province, perm_national):
+        db.add(RolePermission(role_id=role_province.id, permission_id=p.id))
+        db.add(RolePermission(role_id=role_ministry.id, permission_id=p.id))
     await db.flush()
 
     from app.models.org import Employee, Employment, SchoolAssignment
@@ -134,6 +179,22 @@ async def seed(db: AsyncSession) -> None:
                     permission_id=p.id,
                     scope_type="school" if user == school_admin else "district",
                     scope_id=school.id if user == school_admin else dist.id,
+                    is_active=True,
+                )
+            )
+
+    for user, role, perms, scope_type, scope_id in [
+        (province_admin, role_province, (perm_province, perm_national), "province", prov.id),
+        (ministry_user, role_ministry, (perm_province, perm_national), "national", 0),
+    ]:
+        for p in perms:
+            db.add(
+                PermissionAssignment(
+                    user_id=user.id,
+                    role_id=role.id,
+                    permission_id=p.id,
+                    scope_type=scope_type,
+                    scope_id=scope_id,
                     is_active=True,
                 )
             )
@@ -275,9 +336,37 @@ async def seed(db: AsyncSession) -> None:
         for d in (3, 2, 1):
             db.add(practice(uid, t_set.id, 1.0, d))
 
+    # ---------- مدرسه دوم: ۱۰ دانش‌آموز با شواهد کافی (برد/تجمیع بالای حداقل جمعیت) ----------
+    for i, s in enumerate(school2_students):
+        partial = 1.0 if i % 3 else 0.5  # ترکیب قوی/ضعیف برای تجمیع‌های معنادار
+        for d in (6, 3, 1):
+            db.add(practice(s.id, t_set.id, partial, d))
+
     await db.flush()
-    for s in (student, student2, student3, student4, student5):
+    for s in (student, student2, student3, student4, student5, *school2_students):
         await update_states_from_evidence(db, s.id)
+
+    # ---------- بازار معلم خصوصی (فاز ۸) ----------
+    from app.models.tutoring import TutorGroup, TutorProfile
+
+    db.add(
+        TutorProfile(
+            user_id=tutor_user.id,
+            headline="معلم ریاضی — حل تمرین و آماده‌سازی کنکور",
+            subjects=["math"],
+            bio="۱۰ سال تدریس خصوصی ریاضی دهم تا دوازدهم",
+            session_price=400_000,
+            availability="شنبه و چهارشنبه عصر",
+        )
+    )
+    db.add(
+        TutorGroup(
+            tutor_user_id=teacher.id,
+            title="گروه تقویتی ریاضی کلاس ۱۰۱",
+            subject="math",
+            is_open=True,
+        )
+    )
 
     await db.commit()
 

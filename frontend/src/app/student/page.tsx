@@ -89,6 +89,8 @@ export default function StudentHome() {
             <Link href="/student/errors" className="btn-ghost text-sm">دفترچه خطا</Link>
             <Link href="/student/exams" className="btn-ghost text-sm">آزمون‌ها</Link>
             <Link href="/student/tasks" className="btn-ghost text-sm">برنامه امروز</Link>
+            <Link href="/assistant" className="btn-ghost text-sm">دستیار هوشمند</Link>
+            <Link href="/boards" className="btn-ghost text-sm">بردها</Link>
           </div>
         </div>
       </section>
