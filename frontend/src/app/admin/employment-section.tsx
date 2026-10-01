@@ -317,6 +317,9 @@ export function EmploymentSection({ canDecide = false, onChanged }: { canDecide?
                   {t.available === false ? " (شاغل)" : ""}
                 </option>
               ))}
+              {selected && !filtered.some((t) => t.user_id === selected.user_id) && (
+                <option value={selected.user_id}>{selected.full_name}</option>
+              )}
             </Select>
           </Field>
           <Field label="نوع استخدام" required>
