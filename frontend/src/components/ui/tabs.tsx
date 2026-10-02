@@ -1,6 +1,7 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useCallback, type ReactNode } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 export type TabItem = { key: string; label: ReactNode; count?: number; disabled?: boolean };
 
@@ -52,4 +53,30 @@ export function Tabs({
       })}
     </div>
   );
+}
+
+/**
+ * جایگاه بخش فعال را در query آدرس (؟tab=…) نگه می‌دارد تا لینک منو مستقیم آن بخش را باز کند،
+ * رفرش جایگاه را از دست ندهد و دکمه‌ی Back مرورگر کار کند.
+ *
+ * منبع حقیقت همان آدرس است؛ `go` فقط آدرس را عوض می‌کند.
+ * چون از `useSearchParams` استفاده می‌شود، باید داخل یک `<Suspense>` باشد.
+ */
+export function useTabParam(keys: readonly string[], fallback: string) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const search = useSearchParams();
+
+  const raw = search.get("tab");
+  const value = raw !== null && keys.includes(raw) ? raw : fallback;
+
+  const go = useCallback(
+    (k: string) => {
+      if (!keys.includes(k) || k === value) return;
+      router.push(`${pathname}?tab=${encodeURIComponent(k)}`, { scroll: false });
+    },
+    [router, pathname, value, keys]
+  );
+
+  return [value, go] as const;
 }

@@ -10,12 +10,19 @@ import { StatCard } from "@/components/ui/stat";
 import { Alert } from "@/components/ui/alert";
 import { Badge, statusTone } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty";
-import { Tabs } from "@/components/ui/tabs";
+import { Suspense } from "react";
+import { Tabs, useTabParam } from "@/components/ui/tabs";
 import { DataTable, type Column } from "@/components/ui/table";
 import { ProgressBar } from "@/components/ui/progress";
 import { BarChart, DonutChart } from "@/components/ui/charts";
 import { toast } from "@/components/ui/toast";
-import { IconAlert, IconChart, IconLayers, IconTarget, IconUsers } from "@/components/ui/icons";
+import {
+  IconAlert,
+  IconChart,
+  IconLayers,
+  IconTarget,
+  IconUsers,
+} from "@/components/ui/icons";
 import { AssessmentSection } from "./assessment-section";
 import { ExamBuilderSection } from "./exam-builder-section";
 import { ExamAnalysisSection } from "./exam-analysis-section";
@@ -67,8 +74,21 @@ type Group = {
   }[];
 };
 
+const VIEW_KEYS = ["class", "assessment", "builder", "analysis", "copilot", "schedule"] as const;
+
 export default function TeacherPage() {
-  const [view, setView] = useState<"class" | "assessment" | "builder" | "analysis" | "copilot" | "schedule">("class");
+  return (
+    <AppShell>
+      {/* بخش فعال از query آدرس می‌آید → باید داخل یک Suspense باشد */}
+      <Suspense fallback={null}>
+        <TeacherInner />
+      </Suspense>
+    </AppShell>
+  );
+}
+
+function TeacherInner() {
+  const [view, setView] = useTabParam(VIEW_KEYS, "class");
   const [classes, setClasses] = useState<ClassInfo[]>([]);
   const [activeClass, setActiveClass] = useState<number | null>(null);
   const [radar, setRadar] = useState<RadarRow[]>([]);
@@ -221,26 +241,12 @@ export default function TeacherPage() {
   ];
 
   return (
-    <AppShell>
       <div className="space-y-6">
         <PageHeader
           title="پنل معلم — هوش کلاس"
           description="رادار مباحث، ریشه‌یابی ضعف و گروه‌بندی نیاز دانش‌آموزان — بدون رتبه‌بندی."
           crumbs={[{ label: "دانشیار" }, { label: "آموزشی" }, { label: "هوش کلاس" }]}
           badge={classes.length > 0 ? <Badge tone="primary" dot>{fa(classes.length)} کلاس</Badge> : undefined}
-        />
-
-        <Tabs
-          items={[
-            { key: "class", label: "هوش کلاس", count: classes.length },
-            { key: "assessment", label: "ارزیابی صلاحیت" },
-            { key: "builder", label: "سازنده آزمون" },
-            { key: "analysis", label: "تحلیل آزمون" },
-            { key: "copilot", label: "دستیار هوشمند" },
-            { key: "schedule", label: "برنامه من" },
-          ]}
-          value={view}
-          onChange={(k) => setView(k as "class" | "assessment" | "builder" | "analysis" | "copilot" | "schedule")}
         />
 
         {view === "schedule" && <TeacherScheduleSection />}
@@ -409,6 +415,5 @@ export default function TeacherPage() {
           </>
         )}
       </div>
-    </AppShell>
   );
 }

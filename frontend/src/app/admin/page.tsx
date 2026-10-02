@@ -12,11 +12,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty";
 import { Modal } from "@/components/ui/modal";
-import { Tabs } from "@/components/ui/tabs";
+import { useTabParam } from "@/components/ui/tabs";
 import { DataTable, type Column } from "@/components/ui/table";
 import { BarChart, DonutChart } from "@/components/ui/charts";
 import { SkeletonStats } from "@/components/ui/skeleton";
 import { toast } from "@/components/ui/toast";
+import { Suspense } from "react";
 import {
   IconAlert,
   IconChart,
@@ -107,6 +108,7 @@ const FLAG_STYLE: Record<string, string> = {
 };
 
 type Tab =
+  | "overview"
   | "compare"
   | "flags"
   | "teachers"
@@ -115,10 +117,37 @@ type Tab =
   | "students"
   | "copilot"
   | "roster"
-  | "schedule";
+  | "schedule"
+  | "employment";
+
+/** ترتیب نمایش در منوی سمت راست */
+const TAB_KEYS: readonly string[] = [
+  "overview",
+  "compare",
+  "flags",
+  "teachers",
+  "roster",
+  "schedule",
+  "teachercmp",
+  "students",
+  "admissions",
+  "employment",
+  "copilot",
+];
 
 export default function AdminPage() {
-  const [tab, setTab] = useState<Tab>("compare");
+  return (
+    <AppShell>
+      {/* بخش فعال از query آدرس می‌آید → باید داخل یک Suspense باشد */}
+      <Suspense fallback={<SkeletonStats count={4} />}>
+        <AdminInner />
+      </Suspense>
+    </AppShell>
+  );
+}
+
+function AdminInner() {
+  const [tab, setTab] = useTabParam(TAB_KEYS, "overview");
   const [ov, setOv] = useState<Overview | null>(null);
   const [cmp, setCmp] = useState<CompareData | null>(null);
   const [flags, setFlags] = useState<Flag[]>([]);
@@ -278,7 +307,6 @@ export default function AdminPage() {
   ];
 
   return (
-    <AppShell>
       <div className="space-y-6">
         <PageHeader
           title={loading ? "مدیریت مدرسه" : ov?.school.name ?? "مدیریت مدرسه"}
@@ -298,7 +326,7 @@ export default function AdminPage() {
 
         {error && !ov && <Alert variant="danger" title="خطا در دریافت اطلاعات">{error}</Alert>}
 
-        {loading && !ov && (
+        {loading && !ov && tab === "overview" && (
           <div className="space-y-5">
             <SkeletonStats count={4} />
             <SkeletonStats count={2} />
@@ -307,58 +335,47 @@ export default function AdminPage() {
 
         {ov && (
           <>
-            <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-              <StatCard label="دانش‌آموزان" value={fa(ov.students_count)} tone="primary" icon={<IconUsers size={20} />} hint={ov.school.name} />
-              <StatCard
-                label="میانگین تسط مؤثر"
-                value={ov.avg_effective_mastery !== null ? `${fa(ov.avg_effective_mastery, 1)}٪` : "—"}
-                tone="success"
-                icon={<IconTarget size={20} />}
-                hint="همه مباحث"
-              />
-              <StatCard label="نیازمند مداخله" value={fa(ov.needs_intervention)} tone="danger" icon={<IconAlert size={20} />} hint="برنامه ترمیمی لازم دارد" />
-              <StatCard
-                label="مباحث بحرانی/ضعیف"
-                value={fa((ov.status_counts.critical ?? 0) + (ov.status_counts.weak ?? 0))}
-                tone="warning"
-                icon={<IconLayers size={20} />}
-              />
-            </section>
+            {/* نمای کلی — کارت‌های آمار + نمودارها */}
+            {tab === "overview" && (
+              <>
+                <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+                  <StatCard label="دانش‌آموزان" value={fa(ov.students_count)} tone="primary" icon={<IconUsers size={20} />} hint={ov.school.name} />
+                  <StatCard
+                    label="میانگین تسط مؤثر"
+                    value={ov.avg_effective_mastery !== null ? `${fa(ov.avg_effective_mastery, 1)}٪` : "—"}
+                    tone="success"
+                    icon={<IconTarget size={20} />}
+                    hint="همه مباحث"
+                  />
+                  <StatCard label="نیازمند مداخله" value={fa(ov.needs_intervention)} tone="danger" icon={<IconAlert size={20} />} hint="برنامه ترمیمی لازم دارد" />
+                  <StatCard
+                    label="مباحث بحرانی/ضعیف"
+                    value={fa((ov.status_counts.critical ?? 0) + (ov.status_counts.weak ?? 0))}
+                    tone="warning"
+                    icon={<IconLayers size={20} />}
+                  />
+                </section>
 
-            <section className="grid gap-5 lg:grid-cols-3">
-              <Card className="lg:col-span-2">
-                <CardHeader title="مقایسه تسط کلاس‌ها" subtitle={`درس ${cmp?.subject ?? "ریاضی"} — قرمزها کلاس دارای افت`} icon={<IconChart size={17} />} />
-                {classChartData.length > 0 ? (
-                  <BarChart data={classChartData} height={220} id="admin-classes" format={(v) => `${fa(v)}٪`} />
-                ) : (
-                  <EmptyState compact title="داده‌ای برای مقایسه نیست" />
-                )}
-              </Card>
-              <Card>
-                <CardHeader title="توزیع وضعیت مباحث" icon={<IconLayers size={17} />} />
-                {statusData.length > 0 ? (
-                  <DonutChart data={statusData} size={140} thickness={20} centerSubtitle="مبحث" />
-                ) : (
-                  <EmptyState compact title="داده‌ای ثبت نشده" />
-                )}
-              </Card>
-            </section>
-
-            <Tabs
-              items={[
-                { key: "compare", label: "مقایسه کلاس‌ها", count: cmp?.rows.length ?? 0 },
-                { key: "flags", label: "نیازمند بررسی", count: flags.length },
-                { key: "teachers", label: "نمایه معلمان", count: profiles.length },
-                { key: "admissions", label: "ثبت‌نام دانش‌آموزان" },
-                { key: "roster", label: "رکورد دانش‌آموزان" },
-                { key: "schedule", label: "برنامه هفتگی و شیفت" },
-                { key: "teachercmp", label: "مقایسه معلمان" },
-                { key: "students", label: "نمای فردی دانش‌آموز" },
-                { key: "copilot", label: "دستیار هوشمند" },
-              ]}
-              value={tab}
-              onChange={(k) => setTab(k as Tab)}
-            />
+                <section className="grid gap-5 lg:grid-cols-3">
+                  <Card className="lg:col-span-2">
+                    <CardHeader title="مقایسه تسط کلاس‌ها" subtitle={`درس ${cmp?.subject ?? "ریاضی"} — قرمزها کلاس دارای افت`} icon={<IconChart size={17} />} />
+                    {classChartData.length > 0 ? (
+                      <BarChart data={classChartData} height={220} id="admin-classes" format={(v) => `${fa(v)}٪`} />
+                    ) : (
+                      <EmptyState compact title="داده‌ای برای مقایسه نیست" />
+                    )}
+                  </Card>
+                  <Card>
+                    <CardHeader title="توزیع وضعیت مباحث" icon={<IconLayers size={17} />} />
+                    {statusData.length > 0 ? (
+                      <DonutChart data={statusData} size={140} thickness={20} centerSubtitle="مبحث" />
+                    ) : (
+                      <EmptyState compact title="داده‌ای ثبت نشده" />
+                    )}
+                  </Card>
+                </section>
+              </>
+            )}
 
             {/* §7 مقایسه کلاس‌ها */}
             {tab === "compare" && (
@@ -502,8 +519,7 @@ export default function AdminPage() {
         )}
 
         {/* ——— استخدام معلم (ویزارد + کارتابل) ——— */}
-        <EmploymentSection canDecide={canDecide} onChanged={loadAll} />
+        {tab === "employment" && <EmploymentSection canDecide={canDecide} onChanged={loadAll} />}
       </div>
-    </AppShell>
   );
 }

@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, getToken, setToken } from "@/lib/api";
 import { Avatar } from "./avatar";
 import { Button } from "./button";
@@ -13,17 +13,23 @@ import {
   IconBook,
   IconBriefcase,
   IconChart,
+  IconChat,
   IconCheckCircle,
+  IconChevronDown,
+  IconClock,
   IconExam,
   IconFamily,
+  IconGraduation,
   IconHome,
   IconLayers,
   IconLogout,
   IconMap,
   IconMenu,
   IconSchool,
+  IconSearch,
   IconSparkles,
   IconTasks,
+  IconTrend,
   IconUsers,
   IconX,
 } from "./icons";
@@ -41,7 +47,19 @@ export const ROLE_FA: Record<string, string> = {
   platform_admin: "مدیر پلتفرم",
 };
 
-type NavItem = { href: string; label: string; icon: typeof IconHome; roles?: string[] };
+type NavItem = {
+  href: string;
+  label: string;
+  icon: typeof IconHome;
+  /** اگر تعریف نشود، برای همه‌ی نقش‌ها نمایش داده می‌شود */
+  roles?: string[];
+  /** در این نقش‌ها پنهان شود — برای آیتم‌هایی که جای دیگری هم نمایش داده می‌شوند */
+  excludeRoles?: string[];
+  /** آیتم والدِ بازشونده: زیرمجموعه‌ها با کلیک روی فلش باز/بسته می‌شوند */
+  children?: NavItem[];
+  /** تب پیش‌فرض وقتی آدرس query ندارد — برای هایلایت زیرمجموعه‌ها */
+  defaultTab?: string;
+};
 type NavGroup = { title: string; items: NavItem[] };
 
 /** Navigation is built exclusively from existing routes — no dead links. */
@@ -59,7 +77,20 @@ const NAV: NavGroup[] = [
   {
     title: "آموزشی",
     items: [
-      { href: "/teacher", label: "هوش کلاس", icon: IconUsers, roles: ["teacher"] },
+      {
+        href: "/teacher",
+        label: "هوش کلاس",
+        icon: IconUsers,
+        roles: ["teacher"],
+        defaultTab: "class",
+        children: [
+          { href: "/teacher?tab=assessment", label: "ارزیابی صلاحیت", icon: IconCheckCircle },
+          { href: "/teacher?tab=builder", label: "سازنده آزمون", icon: IconExam },
+          { href: "/teacher?tab=analysis", label: "تحلیل آزمون", icon: IconChart },
+          { href: "/teacher?tab=copilot", label: "دستیار کلاس", icon: IconSparkles },
+          { href: "/teacher?tab=schedule", label: "برنامه من", icon: IconClock },
+        ],
+      },
       { href: "/tutor", label: "بازار معلم خصوصی", icon: IconBriefcase, roles: ["student", "teacher", "parent"] },
     ],
   },
@@ -70,7 +101,28 @@ const NAV: NavGroup[] = [
   {
     title: "مدیریت",
     items: [
-      { href: "/admin", label: "مدیریت مدرسه", icon: IconSchool, roles: ["school_admin"] },
+      {
+        href: "/admin",
+        label: "مدیریت مدرسه",
+        icon: IconSchool,
+        roles: ["school_admin"],
+        defaultTab: "overview",
+        children: [
+          { href: "/admin?tab=overview", label: "نمای کلی", icon: IconHome },
+          { href: "/admin?tab=compare", label: "مقایسه کلاس‌ها", icon: IconChart },
+          { href: "/admin?tab=flags", label: "نیازمند بررسی", icon: IconAlert },
+          { href: "/admin?tab=teachers", label: "نمایه معلمان", icon: IconUsers },
+          { href: "/admin?tab=teachercmp", label: "مقایسه معلمان", icon: IconTrend },
+          { href: "/admin?tab=admissions", label: "ثبت‌نام دانش‌آموزان", icon: IconGraduation },
+          { href: "/admin?tab=roster", label: "رکورد دانش‌آموزان", icon: IconTasks },
+          { href: "/admin?tab=schedule", label: "برنامه هفتگی و شیفت", icon: IconClock },
+          { href: "/admin?tab=students", label: "نمای فردی دانش‌آموز", icon: IconSearch },
+          { href: "/admin?tab=employment", label: "استخدام معلم", icon: IconBriefcase },
+          { href: "/admin?tab=copilot", label: "دستیار مدرسه", icon: IconChat },
+          { href: "/assistant", label: "دستیار هوشمند", icon: IconSparkles },
+          { href: "/boards", label: "بردهای تحلیلی", icon: IconLayers },
+        ],
+      },
       { href: "/province", label: "پنل مدیر کل استان", icon: IconMap, roles: ["province_admin"] },
       { href: "/geo", label: "استان و کشور", icon: IconMap, roles: ["ministry"] },
     ],
@@ -78,17 +130,27 @@ const NAV: NavGroup[] = [
   {
     title: "عمومی",
     items: [
-      { href: "/assistant", label: "دستیار هوشمند", icon: IconSparkles },
-      { href: "/boards", label: "بردهای تحلیلی", icon: IconChart },
+      { href: "/assistant", label: "دستیار هوشمند", icon: IconSparkles, excludeRoles: ["school_admin"] },
+      { href: "/boards", label: "بردهای تحلیلی", icon: IconChart, excludeRoles: ["school_admin"] },
       { href: "/parent", label: "پنل والدین", icon: IconFamily, roles: ["parent"] },
       { href: "/billing", label: "امور مالی", icon: IconLayers, roles: ["parent", "teacher"] },
     ],
   },
 ];
 
-function isActive(pathname: string, href: string): boolean {
-  if (pathname === href) return true;
-  return href !== "/student" && pathname.startsWith(`${href}/`);
+/** تب (query) داخل href را جدا می‌کند — مسیرها همیشه بدون query مقایسه می‌شوند. */
+function hrefParts(href: string): { path: string; tab: string | null } {
+  const i = href.indexOf("?");
+  if (i === -1) return { path: href, tab: null };
+  return { path: href.slice(0, i), tab: new URLSearchParams(href.slice(i + 1)).get("tab") };
+}
+
+function isActive(pathname: string, href: string, currentTab: string | null): boolean {
+  const { path, tab } = hrefParts(href);
+  const exact = pathname === path;
+  const nested = path !== "/student" && pathname.startsWith(`${path}/`);
+  if (tab === null) return exact || nested;
+  return exact && currentTab === tab;
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -132,14 +194,6 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, []);
 
   const role = me?.role ?? "";
-  const groups = useMemo(
-    () =>
-      NAV.map((g) => ({
-        ...g,
-        items: g.items.filter((it) => !it.roles || (!!role && it.roles.includes(role))),
-      })).filter((g) => g.items.length > 0),
-    [role]
-  );
 
   const logout = useCallback(() => {
     setToken(null);
@@ -183,43 +237,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           </button>
         </div>
 
-        {/* nav */}
-        <nav className="flex-1 space-y-6 overflow-y-auto px-3 pb-4">
-          {groups.map((g) => (
-            <div key={g.title}>
-              <p className="mb-2 px-3 text-[10px] font-bold uppercase tracking-wider text-white/35">{g.title}</p>
-              <ul className="space-y-1">
-                {g.items.map((it) => {
-                  const active = isActive(pathname, it.href);
-                  const Icon = it.icon;
-                  return (
-                    <li key={it.href}>
-                      <Link
-                        href={it.href}
-                        aria-current={active ? "page" : undefined}
-                        className={[
-                          "group relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] font-semibold transition",
-                          active
-                            ? "bg-white/10 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,.08)]"
-                            : "text-white/60 hover:bg-white/5 hover:text-white",
-                        ].join(" ")}
-                      >
-                        {active && (
-                          <span className="absolute inset-y-2 -right-3 w-1 rounded-full bg-accent-400" aria-hidden="true" />
-                        )}
-                        <Icon size={18} className={active ? "text-accent-300" : "text-white/45 group-hover:text-white/80"} />
-                        <span className="truncate">{it.label}</span>
-                      </Link>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          ))}
-          {groups.length === 0 && (
-            <p className="px-3 text-xs leading-6 text-white/40">در حال شناسایی سطح دسترسی…</p>
-          )}
-        </nav>
+        {/* nav — داخل Suspense چون query آدرس را می‌خواند */}
+        <Suspense fallback={<p className="px-6 text-xs leading-6 text-white/40">در حال شناسایی سطح دسترسی…</p>}>
+          <SidebarNav role={role} />
+        </Suspense>
 
         {/* user footer */}
         <div className="m-3 rounded-2xl bg-white/5 p-3">
@@ -301,5 +322,123 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       <Toaster />
     </div>
+  );
+}
+
+/**
+ * منوی سمت راست — با آیتم‌های والدِ بازشونده.
+ *
+ * داخل `<Suspense>` رندر می‌شود چون query آدرس (؟tab=) را می‌خواند تا زیرمجموعه‌ی
+ * درست را هایلایت کند؛ خودِ `AppShell` به این مرز نیاز دارد.
+ */
+function SidebarNav({ role }: { role: string }) {
+  const pathname = usePathname();
+  const currentTab = useSearchParams().get("tab");
+  const [openMap, setOpenMap] = useState<Record<string, boolean>>({});
+
+  const groups = useMemo(
+    () =>
+      NAV.map((g) => ({
+        ...g,
+        items: g.items.filter(
+          (it) =>
+            (!it.roles || (!!role && it.roles.includes(role))) &&
+            (!it.excludeRoles || !it.excludeRoles.includes(role))
+        ),
+      })).filter((g) => g.items.length > 0),
+    [role]
+  );
+
+  return (
+    <nav className="flex-1 space-y-6 overflow-y-auto px-3 pb-4">
+      {groups.map((g) => (
+        <div key={g.title}>
+          <p className="mb-2 px-3 text-[10px] font-bold uppercase tracking-wider text-white/35">{g.title}</p>
+          <ul className="space-y-1">
+            {g.items.map((it) => {
+              const Icon = it.icon;
+              const kids = it.children;
+              const selfActive = isActive(pathname, it.href, currentTab);
+              const kidTab = currentTab ?? it.defaultTab ?? null;
+              const anyKidActive = !!kids?.some((k) => isActive(pathname, k.href, kidTab));
+              const highlighted = selfActive || anyKidActive;
+              const open = kids ? (openMap[it.href] ?? highlighted) : false;
+
+              return (
+                <li key={it.href}>
+                  <div
+                    className={`relative flex items-center rounded-xl transition ${
+                      highlighted ? "bg-white/10 shadow-[inset_0_0_0_1px_rgba(255,255,255,.08)]" : "hover:bg-white/5"
+                    }`}
+                  >
+                    <Link
+                      href={it.href}
+                      aria-current={selfActive ? "page" : undefined}
+                      className={`group relative flex min-w-0 flex-1 items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] font-semibold transition ${
+                        highlighted ? "text-white" : "text-white/60"
+                      }`}
+                    >
+                      {highlighted && (
+                        <span className="absolute inset-y-2 -right-3 w-1 rounded-full bg-accent-400" aria-hidden="true" />
+                      )}
+                      <Icon
+                        size={18}
+                        className={highlighted ? "text-accent-300" : "text-white/45 group-hover:text-white/80"}
+                      />
+                      <span className="truncate">{it.label}</span>
+                    </Link>
+                    {kids && (
+                      <button
+                        type="button"
+                        onClick={() => setOpenMap((m) => ({ ...m, [it.href]: !open }))}
+                        aria-expanded={open}
+                        aria-label={open ? `بستن زیرمجموعه‌های ${it.label}` : `باز کردن زیرمجموعه‌های ${it.label}`}
+                        className="me-2 ms-1.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg text-white/45 transition hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400"
+                      >
+                        <IconChevronDown
+                          size={14}
+                          className={`transition-transform duration-200 ${open ? "rotate-0" : "rotate-90"}`}
+                        />
+                      </button>
+                    )}
+                  </div>
+
+                  {kids && open && (
+                    <ul className="mt-1 mr-2 space-y-0.5 border-r border-white/10 pr-1.5">
+                      {kids.map((k) => {
+                        const KIcon = k.icon;
+                        const kActive = isActive(pathname, k.href, kidTab);
+                        return (
+                          <li key={k.href}>
+                            <Link
+                              href={k.href}
+                              aria-current={kActive ? "page" : undefined}
+                              className={`group flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[12.5px] transition ${
+                                kActive
+                                  ? "bg-white/10 font-bold text-white"
+                                  : "font-medium text-white/55 hover:bg-white/5 hover:text-white"
+                              }`}
+                            >
+                              <KIcon
+                                size={15}
+                                className={kActive ? "text-accent-300" : "text-white/40 group-hover:text-white/75"}
+                              />
+                              <span className="truncate">{k.label}</span>
+                            </Link>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ))}
+      {groups.length === 0 && (
+        <p className="px-3 text-xs leading-6 text-white/40">در حال شناسایی سطح دسترسی…</p>
+      )}
+    </nav>
   );
 }
