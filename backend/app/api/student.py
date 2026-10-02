@@ -379,3 +379,15 @@ async def exam_attempt_review(
     if detail is None:
         raise HTTPException(404, "تلاش آزمون یافت نشد")
     return detail
+
+
+@router.get("/schedule")
+async def my_schedule(
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """برنامه هفتگی کلاس دانش‌آموز — همان ردیف‌هایی که مدیر مدرسه ثبت کرده
+    (همگام‌سازی: یک منبع حقیقت برای همه پنل‌ها). بدون کلاس → خالی."""
+    from app.services import school_ops
+
+    return await school_ops.student_schedule(db, current.id)

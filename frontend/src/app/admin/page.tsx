@@ -32,6 +32,8 @@ import { AdmissionsSection } from "./admissions-section";
 import { TeachersCompareSection } from "./teachers-compare-section";
 import { StudentViewSection } from "./student-view-section";
 import { SchoolCopilotSection } from "./school-copilot-section";
+import { RosterSection } from "./roster-section";
+import { ScheduleSection } from "./schedule-section";
 
 type Overview = {
   school: { id: number; name: string; type: string; ownership: string };
@@ -104,7 +106,16 @@ const FLAG_STYLE: Record<string, string> = {
   low_platform_usage: "bg-slate-100 text-ink-muted",
 };
 
-type Tab = "compare" | "flags" | "teachers" | "admissions" | "teachercmp" | "students" | "copilot";
+type Tab =
+  | "compare"
+  | "flags"
+  | "teachers"
+  | "admissions"
+  | "teachercmp"
+  | "students"
+  | "copilot"
+  | "roster"
+  | "schedule";
 
 export default function AdminPage() {
   const [tab, setTab] = useState<Tab>("compare");
@@ -339,6 +350,8 @@ export default function AdminPage() {
                 { key: "flags", label: "نیازمند بررسی", count: flags.length },
                 { key: "teachers", label: "نمایه معلمان", count: profiles.length },
                 { key: "admissions", label: "ثبت‌نام دانش‌آموزان" },
+                { key: "roster", label: "رکورد دانش‌آموزان" },
+                { key: "schedule", label: "برنامه هفتگی و شیفت" },
                 { key: "teachercmp", label: "مقایسه معلمان" },
                 { key: "students", label: "نمای فردی دانش‌آموز" },
                 { key: "copilot", label: "دستیار هوشمند" },
@@ -414,6 +427,12 @@ export default function AdminPage() {
 
             {/* ثبت‌نام دانش‌آموزان */}
             {tab === "admissions" && <AdmissionsSection schoolId={ov?.school.id ?? null} />}
+
+            {/* رکورد کامل: همه دانش‌آموزان با جایگاه کلاسی + کلاس‌ها + معلمان */}
+            {tab === "roster" && <RosterSection schoolId={ov?.school.id ?? null} />}
+
+            {/* شیفت‌های مدرسه + برنامه هفتگی هر کلاس + کادر آموزشی */}
+            {tab === "schedule" && <ScheduleSection schoolId={ov?.school.id ?? null} />}
 
             {/* §8 مقایسه معلم با معلم — با احتیاط */}
             {tab === "teachercmp" && <TeachersCompareSection schoolId={ov?.school.id ?? null} />}

@@ -26,6 +26,7 @@ import {
   IconTasks,
   IconTrend,
 } from "@/components/ui/icons";
+import { StudentScheduleSection } from "./schedule-section";
 
 const STATUS_SEG_COLOR: Record<string, string> = {
   mastered: "#10b981",
@@ -211,6 +212,9 @@ export default function StudentHome() {
                 )}
               </Card>
             </section>
+
+            {/* ——— برنامه هفتگی کلاس (همان داده‌ای که مدیر مدرسه ثبت می‌کند) ——— */}
+            <StudentScheduleSection />
 
             {/* ——— empty safeguard ——— */}
             {STATUS_ORDER.every((s) => (data.status_counts[s] ?? 0) === 0) && (

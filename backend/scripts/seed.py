@@ -117,6 +117,8 @@ async def seed(db: AsyncSession) -> None:
         # ساخته می‌شود (کلید Permission یکتاست) و حلقه‌های نقش مدرسه/ناحیه
         # (و چک‌لیست معاون) خودشان آن را برمی‌دارند.
         ("manage_admissions", "مدیریت ثبت‌نام دانش‌آموزان"),
+        # پنل کامل مدیر مدرسه: شیفت‌ها، برنامه هفتگی، کلاس‌ها، جابه‌جایی دانش‌آموز
+        ("manage_school_ops", "مدیریت عملیات مدرسه"),
     ]
     perm_objs = {}
     for key, title in perm_defs:
@@ -410,6 +412,53 @@ async def seed(db: AsyncSession) -> None:
             status="active",
         )
     )
+
+    # ---------- شیفت‌ها و برنامه هفتگی نمونه (پنل کامل مدیر مدرسه) ----------
+    # مدرسه ۱ تک‌شیفت (۰۸:۰۰–۱۵:۰۰)؛ مدرسه ۲ دوشیفت (۰۸:۰۰–۱۲:۰۰ و ۱۲:۰۰–۱۸:۰۰)
+    from app.models.school_ops import ClassScheduleEntry, SchoolShift
+
+    shift_morning = SchoolShift(
+        school_id=school.id, name="شیفت صبح", start_time="08:00", end_time="15:00", order=0
+    )
+    db.add_all(
+        [
+            shift_morning,
+            SchoolShift(school_id=school2.id, name="شیفت اول", start_time="08:00", end_time="12:00", order=0),
+            SchoolShift(school_id=school2.id, name="شیفت دوم", start_time="12:00", end_time="18:00", order=1),
+        ]
+    )
+    await db.flush()
+
+    # برنامه هفتگی نمونه کلاس ۱۰۱ (معلم ریاضی = teacher1) و ۱۰۲ (teacher2) و ۲۰۱
+    # (بدون معلم — جلسه‌های آزاد) — بدون تداخل زمانی بین معلمان
+    sample_schedule = [
+        # کلاس ۱۰۱ — teacher1 ریاضی، روزهای ۰ (شنبه) تا ۴ (چهارشنبه)
+        (cls.id, school.id, 0, "08:00", "09:30", "math", teacher.id),
+        (cls.id, school.id, 1, "08:00", "09:30", "math", teacher.id),
+        (cls.id, school.id, 2, "08:00", "09:30", "math", teacher.id),
+        (cls.id, school.id, 3, "10:00", "11:30", "math", teacher.id),
+        (cls.id, school.id, 4, "10:00", "11:30", "math", teacher.id),
+        # کلاس ۱۰۲ — teacher2 ریاضی، بعدازظهر (داخل شیفت صبح)
+        (cls2.id, school.id, 0, "11:00", "12:30", "math", teacher2.id),
+        (cls2.id, school.id, 2, "11:00", "12:30", "math", teacher2.id),
+        (cls2.id, school.id, 4, "13:00", "14:30", "math", teacher2.id),
+        # کلاس ۲۰۱ مدرسه ۲ — شیفت اول، بدون معلم ثبت‌شده
+        (cls3.id, school2.id, 0, "08:00", "09:30", "math", None),
+        (cls3.id, school2.id, 2, "09:45", "11:15", "math", None),
+    ]
+    for class_id, school_id, day, start, end, subject, teacher_user_id in sample_schedule:
+        db.add(
+            ClassScheduleEntry(
+                class_id=class_id,
+                school_id=school_id,
+                day=day,
+                start_time=start,
+                end_time=end,
+                subject=subject,
+                teacher_user_id=teacher_user_id,
+            )
+        )
+    await db.flush()
 
     # ---------- شواهد نمونه برای رادار کلاس و گروه‌بندی نیاز ----------
     from app.models.slm import Evidence

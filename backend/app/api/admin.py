@@ -14,13 +14,23 @@ from app.api.deps import AuthUser, get_current_user, require_permission
 from app.core.db import get_db
 from app.core.passwords import hash_password
 from app.models.employment import EmploymentPolicyRule, EmploymentRequest
-from app.models.org import AdmissionRequest, ClassRoom, Employee, School, SchoolAssignment, StudentProfile, User
+from app.models.org import (
+    AdmissionRequest,
+    ClassRoom,
+    ClassTeacherAssignment,
+    Employee,
+    School,
+    SchoolAssignment,
+    StudentProfile,
+    User,
+)
 from app.models.rbac import Deputy, Permission, Role
 from app.models.school_copilot import SchoolSuggestion
 from app.models.slm import StudentTopicState
 from app.services import admission as admission_svc
 from app.services import school as school_svc
 from app.services import school_copilot as copilot_svc
+from app.services import school_ops as ops_svc
 from app.services import school_views
 from app.services.employment import decide_request, is_principal_of, submit_teacher_request
 from app.services.rbac_service import (
@@ -1329,3 +1339,231 @@ async def decide_school_suggestion(
     )
     await db.commit()
     return {"ok": True, "suggestion": _suggestion_row(sugg)}
+
+
+# ------------------------- پنل کامل مدیر مدرسه: شیفت، برنامه، کلاس‌ها -------------------------
+
+
+class ShiftRowIn(BaseModel):
+    name: str
+    start_time: str
+    end_time: str
+
+
+class ShiftsIn(BaseModel):
+    shifts: list[ShiftRowIn]
+
+
+@router.get("/school/{school_id}/shifts")
+async def get_school_shifts(
+    school_id: int,
+    current: AuthUser = Depends(require_permission("view_school_analytics", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """شیفت‌های مدرسه (تک‌شیفت/دوشیفت با ساعت متغیر — تأیید مدیر مدرسه)."""
+    return {"school_id": school_id, "shifts": await ops_svc.list_shifts(db, school_id)}
+
+
+@router.put("/school/{school_id}/shifts")
+async def put_school_shifts(
+    school_id: int,
+    body: ShiftsIn,
+    current: AuthUser = Depends(require_permission("manage_school_ops", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """جایگزینی کامل شیفت‌ها — ۱ تا ۳ شیفت، بدون تداخل ساعتی؛ اگر برنامه
+    کلاسی خارج از شیفت جدید شود 400 برمی‌گرداند (اول برنامه اصلاح شود)."""
+    result = await ops_svc.set_shifts(
+        db, school_id, [s.model_dump() for s in body.shifts], actor_user_id=current.id
+    )
+    await db.commit()
+    return {"ok": True, **result}
+
+
+@router.get("/school/{school_id}/schedule")
+async def get_school_schedule(
+    school_id: int,
+    current: AuthUser = Depends(require_permission("view_school_analytics", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """برنامه هفتگی همه کلاس‌های مدرسه + شیفت‌ها — نمای یکپارچه مدیر."""
+    return await ops_svc.get_school_schedule(db, school_id)
+
+
+@router.get("/classes/{class_id}/schedule")
+async def get_class_schedule(
+    class_id: int,
+    current: AuthUser = Depends(require_permission("view_school_analytics", scope_type="class", scope_param="class_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """برنامه هفتگی یک کلاس."""
+    return await ops_svc.get_class_schedule(db, class_id)
+
+
+@router.put("/classes/{class_id}/schedule")
+async def put_class_schedule(
+    class_id: int,
+    body: dict,
+    current: AuthUser = Depends(require_permission("manage_school_ops", scope_type="class", scope_param="class_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """جایگزینی کامل برنامه هفتگی کلاس. اعتبارسنجی: روز ۰ تا ۶، ساعت معتبر،
+    انطباق با شیفت مدرسه، عدم تداخل داخل کلاس، عدم تداخل معلم بین کلاس‌ها،
+    عضویت معلم در مدرسه. رویداد ممیزی class_schedule_updated."""
+    cls = await db.get(ClassRoom, class_id)
+    if cls is None:
+        raise HTTPException(404, "کلاس یافت نشد")
+    entries = body.get("entries") if isinstance(body, dict) else None
+    if not isinstance(entries, list):
+        raise HTTPException(400, "ساختار درخواست نامعتبر است (entries)")
+    result = await ops_svc.replace_class_schedule(
+        db, cls.school_id, class_id, entries, actor_user_id=current.id
+    )
+    await db.commit()
+    return {"ok": True, **result}
+
+
+@router.get("/school/{school_id}/roster")
+async def get_school_roster(
+    school_id: int,
+    current: AuthUser = Depends(require_permission("view_students", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """همه دانش‌آموزان مدرسه با جایگاه کلاسی (کلاس‌ها + بدون کلاس)."""
+    return await ops_svc.roster(db, school_id)
+
+
+@router.post("/school/{school_id}/classes")
+async def create_school_class(
+    school_id: int,
+    body: dict,
+    current: AuthUser = Depends(require_permission("manage_school_ops", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """افزودن کلاس جدید به مدرسه."""
+    result = await ops_svc.create_class(
+        db,
+        school_id,
+        name=body.get("name", ""),
+        grade=body.get("grade", ""),
+        track=body.get("track"),
+        capacity=int(body.get("capacity") or 30),
+        actor_user_id=current.id,
+    )
+    await db.commit()
+    return {"ok": True, "class": result}
+
+
+@router.patch("/classes/{class_id}")
+async def patch_school_class(
+    class_id: int,
+    body: dict,
+    current: AuthUser = Depends(require_permission("manage_school_ops", scope_type="class", scope_param="class_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """ویرایش نام/ظرفیت کلاس (ظرفیت کمتر از ثبت‌شده → 409)."""
+    result = await ops_svc.update_class(
+        db,
+        class_id,
+        name=body.get("name"),
+        capacity=body.get("capacity"),
+        actor_user_id=current.id,
+    )
+    await db.commit()
+    return {"ok": True, "class": result}
+
+
+class TeacherAssignIn(BaseModel):
+    teacher_user_id: int
+    subject: str
+
+
+@router.get("/classes/{class_id}/teachers")
+async def list_class_teachers(
+    class_id: int,
+    current: AuthUser = Depends(require_permission("view_students", scope_type="class", scope_param="class_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """تخصیص‌های فعال معلم به این کلاس (برای نمایش و خاتمه تخصیص)."""
+    rows = (
+        await db.execute(
+            select(ClassTeacherAssignment, User.full_name)
+            .join(User, ClassTeacherAssignment.teacher_user_id == User.id)
+            .where(
+                ClassTeacherAssignment.class_id == class_id,
+                ClassTeacherAssignment.status == "active",
+            )
+            .order_by(ClassTeacherAssignment.id)
+        )
+    ).all()
+    return {
+        "teachers": [
+            {
+                "assignment_id": a.id,
+                "teacher_user_id": a.teacher_user_id,
+                "full_name": name,
+                "subject": a.subject,
+                "start_date": a.start_date.isoformat() if a.start_date else None,
+            }
+            for a, name in rows
+        ]
+    }
+
+
+@router.post("/classes/{class_id}/teachers")
+async def assign_class_teacher(
+    class_id: int,
+    body: TeacherAssignIn,
+    current: AuthUser = Depends(require_permission("manage_school_ops", scope_type="class", scope_param="class_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """تخصیص معلم به کلاس (عضو معلم در مدرسه الزامی)."""
+    result = await ops_svc.assign_teacher(
+        db, class_id, body.teacher_user_id, body.subject, actor_user_id=current.id
+    )
+    await db.commit()
+    return {"ok": True, "assignment": result}
+
+
+@router.delete("/classes/{class_id}/teachers/{assignment_id}")
+async def unassign_class_teacher(
+    class_id: int,
+    assignment_id: int,
+    current: AuthUser = Depends(require_permission("manage_school_ops", scope_type="class", scope_param="class_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """خاتمه تخصیص معلم — تا وقتی در برنامه هفتگی کلاس جلسه دارد 409."""
+    result = await ops_svc.unassign_teacher(db, class_id, assignment_id, actor_user_id=current.id)
+    await db.commit()
+    return result
+
+
+class StudentMoveIn(BaseModel):
+    class_id: int | None = None
+
+
+@router.patch("/school/{school_id}/students/{user_id}")
+async def move_school_student(
+    school_id: int,
+    user_id: int,
+    body: StudentMoveIn,
+    current: AuthUser = Depends(require_permission("manage_admissions", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """جابه‌جایی دانش‌آموز بین کلاس‌ها (یا بدون کلاس) — داده واحدی که
+    پنل دانش‌آموز/معلم فوراً از همان می‌خوانند. ظرفیت تکمیل → 409."""
+    result = await ops_svc.move_student(
+        db, school_id, user_id, body.class_id, actor_user_id=current.id
+    )
+    await db.commit()
+    return result
+
+
+@router.get("/school/{school_id}/staff")
+async def get_school_staff(
+    school_id: int,
+    current: AuthUser = Depends(require_permission("view_students", scope_type="school", scope_param="school_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """کادر آموزشی: کلاس/درس هر معلم + شیفت و بار هفتگی استخراج‌شده از برنامه."""
+    return await ops_svc.staff(db, school_id)

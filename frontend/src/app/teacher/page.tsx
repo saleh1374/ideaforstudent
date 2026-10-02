@@ -20,6 +20,7 @@ import { AssessmentSection } from "./assessment-section";
 import { ExamBuilderSection } from "./exam-builder-section";
 import { ExamAnalysisSection } from "./exam-analysis-section";
 import { CopilotSection } from "./copilot-section";
+import { TeacherScheduleSection } from "./schedule-section";
 
 type ClassInfo = {
   class_id: number;
@@ -67,7 +68,7 @@ type Group = {
 };
 
 export default function TeacherPage() {
-  const [view, setView] = useState<"class" | "assessment" | "builder" | "analysis" | "copilot">("class");
+  const [view, setView] = useState<"class" | "assessment" | "builder" | "analysis" | "copilot" | "schedule">("class");
   const [classes, setClasses] = useState<ClassInfo[]>([]);
   const [activeClass, setActiveClass] = useState<number | null>(null);
   const [radar, setRadar] = useState<RadarRow[]>([]);
@@ -236,10 +237,13 @@ export default function TeacherPage() {
             { key: "builder", label: "سازنده آزمون" },
             { key: "analysis", label: "تحلیل آزمون" },
             { key: "copilot", label: "دستیار هوشمند" },
+            { key: "schedule", label: "برنامه من" },
           ]}
           value={view}
-          onChange={(k) => setView(k as "class" | "assessment" | "builder" | "analysis" | "copilot")}
+          onChange={(k) => setView(k as "class" | "assessment" | "builder" | "analysis" | "copilot" | "schedule")}
         />
+
+        {view === "schedule" && <TeacherScheduleSection />}
 
         {view === "assessment" && <AssessmentSection />}
 

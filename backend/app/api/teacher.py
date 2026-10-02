@@ -995,3 +995,15 @@ async def decide_teacher_suggestion(
     )
     await db.commit()
     return {"ok": True, "suggestion": _suggestion_row(sugg)}
+
+
+@router.get("/my-schedule")
+async def my_schedule(
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """برنامه هفتگی همه کلاس‌های معلم + شیفت و بار هفتگی — از همان ردیف‌های
+    برنامه کلاس‌ها (همگام با پنل مدیر)."""
+    from app.services import school_ops
+
+    return await school_ops.teacher_schedule(db, current.id)

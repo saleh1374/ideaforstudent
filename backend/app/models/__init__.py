@@ -7,6 +7,7 @@ from app.models import (  # noqa: F401
     employment,
     org,
     rbac,
+    school_ops,
     slm,
     stats,
     teacher_assessment,
