@@ -25,9 +25,23 @@ async def chat(
 ):
     if not body.message.strip():
         raise HTTPException(400, "پیام خالی است")
+    # سقف روزانهٔ پرسش (§9.3) + خاموشی حین آزمون (§9.2)
+    try:
+        await assistant_svc.assert_chat_allowed(db, current.id)
+    except assistant_svc.ChatBlocked as blocked:
+        raise HTTPException(blocked.status, blocked.message_fa)
     result = await assistant_svc.chat(db, current.id, body.message.strip(), body.conversation_id)
     await db.commit()  # پیام‌ها + کش معنایی باید پایدار شوند
     return result
+
+
+@router.get("/status")
+async def status(
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """وضعیت دستیار: سقف پرسش روزانه، باقی‌مانده و سکوت حین آزمون (§9.2/§9.3)."""
+    return await assistant_svc.chat_status(db, current.id)
 
 
 @router.get("/conversations")

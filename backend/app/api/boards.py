@@ -34,3 +34,21 @@ async def national_board(
     db: AsyncSession = Depends(get_db),
 ):
     return await boards_svc.national_board(db)
+
+
+@router.get("/me")
+async def my_board(
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """«جایگاه من» (§8.1): سه نما — عملکرد/رشد/تسط + صدک و مقایسهٔ مبحثی."""
+    return await boards_svc.student_board(db, current.id)
+
+
+@router.get("/me/badges")
+async def my_badges(
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """نشان‌ها و تقدیر (§8.4) — پاداش رشد و رفتار یادگیری."""
+    return await boards_svc.student_badges(db, current.id)

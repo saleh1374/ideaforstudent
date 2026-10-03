@@ -11,6 +11,7 @@ import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty";
 import { Tabs } from "@/components/ui/tabs";
+import { MyBoard } from "@/app/boards/my-board";
 import { DataTable, type Column } from "@/components/ui/table";
 import { SkeletonStats, SkeletonTable } from "@/components/ui/skeleton";
 import { IconChart, IconShield, IconUsers } from "@/components/ui/icons";
@@ -34,9 +35,10 @@ type Board = {
   total?: BoardRow;
 };
 
-type Tab = "school" | "province" | "national";
+type Tab = "mine" | "school" | "province" | "national";
 
 const TAB_FA: Record<Tab, string> = {
+  mine: "جایگاه من",
   school: "مدرسه",
   province: "استان",
   national: "کشور",
@@ -57,8 +59,31 @@ export default function BoardsPage() {
     setError("");
     setLoading(true);
     try {
-      // MVP: شناسه‌های نمونه (مدرسه ۱، استان ۱)
-      const path = t === "school" ? "/boards/school/1" : t === "province" ? "/boards/province/1" : "/boards/national";
+      if (t === "mine") return; // «جایگاه من» توسط MyBoard خودش بارگذاری می‌شود
+      // شناسهٔ مدرسه/استان از حوزهٔ دسترسی خود کاربر می‌آید (نه hardcode)
+      let path = "/boards/national";
+      if (t === "school") {
+        let mine: { default_id: number | null };
+        try {
+          mine = await api<{ default_id: number | null }>("/admin/my/schools");
+        } catch {
+          // دانش‌آموز به /admin/my/schools دسترسی ندارد → تب «جایگاه من» باز می‌شود
+          setTab("mine");
+          return;
+        }
+        if (mine.default_id === null) {
+          setTab("mine");
+          return;
+        }
+        path = `/boards/school/${mine.default_id}`;
+      } else if (t === "province") {
+        const geo = await api<{ province_id: number | null }>("/geo/me");
+        if (geo.province_id === null) {
+          setError("حوزهٔ استانی برای شما تعریف نشده است.");
+          return;
+        }
+        path = `/boards/province/${geo.province_id}`;
+      }
       setBoard(await api<Board>(path));
     } catch (e) {
       setError(e instanceof Error ? e.message : "خطا");
@@ -70,6 +95,15 @@ export default function BoardsPage() {
   useEffect(() => {
     load(tab);
   }, [tab, load]);
+
+  // دانش‌آموز مستقیم روی تب «جایگاه من» می‌رود؛ معلم/مدیر/ناحیه روی برد مدرسه می‌مانند
+  useEffect(() => {
+    api<{ role: string }>("/auth/me")
+      .then((m) => {
+        if (m.role === "student") setTab("mine");
+      })
+      .catch(() => undefined);
+  }, []);
 
   const columns: Column<BoardRow>[] = [
     { key: "key", header: "کد مستعار", render: (row) => <span className="font-semibold text-ink">{row.key}</span> },
@@ -138,7 +172,10 @@ export default function BoardsPage() {
         {error && <Alert variant="danger" title="خطا در دریافت برد">{error}</Alert>}
 
         <Tabs
-          items={(["school", "province", "national"] as Tab[]).map((t) => ({ key: t, label: TAB_FA[t] }))}
+          items={[
+            { key: "mine", label: "جایگاه من" },
+            ...(["school", "province", "national"] as Tab[]).map((t) => ({ key: t, label: TAB_FA[t] })),
+          ]}
           value={tab}
           onChange={(k) => setTab(k as Tab)}
         />
@@ -150,7 +187,9 @@ export default function BoardsPage() {
           </div>
         )}
 
-        {!loading && board && (
+        {!loading && tab === "mine" && <MyBoard />}
+
+        {!loading && tab !== "mine" && board && (
           <Section className="animate-fade-in">
             <Alert variant="info">{board.note_fa}</Alert>
 
@@ -185,7 +224,7 @@ export default function BoardsPage() {
           </Section>
         )}
 
-        {!loading && !board && !error && (
+        {!loading && !board && !error && tab !== "mine" && (
           <EmptyState icon={<IconShield size={26} />} title="داده‌ای در دسترس نیست" description="برای این محدوده، بردی بازگردانده نشد." />
         )}
       </div>

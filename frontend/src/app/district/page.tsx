@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, Suspense } from "react";
 import { api, getToken } from "@/lib/api";
 import { fa } from "@/lib/labels";
 import { AppShell } from "@/components/ui/shell";
@@ -11,7 +11,7 @@ import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty";
-import { Tabs } from "@/components/ui/tabs";
+import { Tabs, useTabParam } from "@/components/ui/tabs";
 import { BarChart, DonutChart } from "@/components/ui/charts";
 import { SkeletonStats, SkeletonCard } from "@/components/ui/skeleton";
 import {
@@ -61,6 +61,17 @@ type Tab =
   | "exams"
   | "interventions";
 
+const TAB_KEYS: readonly string[] = [
+  "overview",
+  "schools",
+  "staff",
+  "employment",
+  "qualifications",
+  "exams",
+  "interventions",
+  "admissions",
+];
+
 const STATUS_FA: Record<string, string> = {
   mastered: "مسلط",
   consolidating: "در حال تثبیت",
@@ -78,7 +89,18 @@ const STATUS_COLOR: Record<string, string> = {
 };
 
 export default function DistrictPage() {
-  const [tab, setTab] = useState<Tab>("overview");
+  return (
+    <AppShell>
+      {/* بخش فعال از query آدرس می‌آید → باید داخل یک Suspense باشد */}
+      <Suspense fallback={null}>
+        <DistrictInner />
+      </Suspense>
+    </AppShell>
+  );
+}
+
+function DistrictInner() {
+  const [tab, setTab] = useTabParam(TAB_KEYS, "overview");
   const [role, setRole] = useState(""); // "" = هنوز بررسی نشده
   const [denied, setDenied] = useState(false);
   const [ov, setOv] = useState<Overview | null>(null);
@@ -141,26 +163,23 @@ export default function DistrictPage() {
   /* ---------------- غیر از مدیر ناحیه ---------------- */
   if (denied) {
     return (
-      <AppShell>
-        <div className="space-y-6">
-          {header}
-          <Alert variant="warning" title="دسترسی محدود">
-            این صفحه ویژه مدیر ناحیه است. با حساب مدیر ناحیه وارد شوید؛ سرور نیز دامنه دسترسی را جداگانه کنترل می‌کند.
-          </Alert>
-          <EmptyState
-            icon={<IconShield size={26} />}
-            title="نقش شما به این صفحه دسترسی ندارد"
-            description={`نقش فعلی: ${role || "—"}`}
-          />
-        </div>
-      </AppShell>
+      <div className="space-y-6">
+        {header}
+        <Alert variant="warning" title="دسترسی محدود">
+          این صفحه ویژه مدیر ناحیه است. با حساب مدیر ناحیه وارد شوید؛ سرور نیز دامنه دسترسی را جداگانه کنترل می‌کند.
+        </Alert>
+        <EmptyState
+          icon={<IconShield size={26} />}
+          title="نقش شما به این صفحه دسترسی ندارد"
+          description={`نقش فعلی: ${role || "—"}`}
+        />
+      </div>
     );
   }
 
   return (
-    <AppShell>
-      <div className="space-y-6">
-        {header}
+    <div className="space-y-6">
+      {header}
 
         {error && <Alert variant="danger" title="خطا در دریافت داده">{error}</Alert>}
 
@@ -176,7 +195,7 @@ export default function DistrictPage() {
             { key: "admissions", label: "ثبت‌نام دانش‌آموزان" },
           ]}
           value={tab}
-          onChange={(k) => setTab(k as Tab)}
+          onChange={(k) => setTab(k)}
         />
 
         {/* ---------------- نمای کلان ---------------- */}
@@ -278,6 +297,5 @@ export default function DistrictPage() {
         {tab === "interventions" && <InterventionsSection />}
         {tab === "admissions" && <AdmissionsSection onChanged={loadOverview} />}
       </div>
-    </AppShell>
   );
 }

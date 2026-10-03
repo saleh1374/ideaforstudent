@@ -89,3 +89,49 @@ def test_priority_caps_repeat_weight():
     p2 = task_priority(1.0, 10, 1.0, 1.0)  # repeat weight capped at 2.0
     assert p1 == 1.0
     assert p2 == 2.0
+
+
+# --------------------- پیشرفت در برنامه، فرمول وزن‌دار P (§4.4) ---------------------
+
+
+def test_plan_unit_weights_cover_spec_units():
+    from app.services.slm import PLAN_TASK_UNIT, PLAN_UNIT_WEIGHTS
+
+    # واحدهای سند §4.4: درس، تمرین، کوییز، آزمون دوره‌ای، ترمیمی
+    assert set(PLAN_UNIT_WEIGHTS) == {
+        "lesson",
+        "practice",
+        "quiz",
+        "period_exam",
+        "remedial",
+    }
+    assert abs(sum(PLAN_UNIT_WEIGHTS.values()) - 1.0) < 1e-9
+    # نگاشت نوع کار برنامه ← واحد فرمول
+    assert PLAN_TASK_UNIT["lesson"] == "lesson"
+    assert PLAN_TASK_UNIT["practice"] == "practice"
+    assert PLAN_TASK_UNIT["quiz"] == "quiz"
+    assert PLAN_TASK_UNIT["remedial_pack"] == "remedial"
+    assert PLAN_TASK_UNIT["retest"] == "remedial"
+
+
+def test_progress_in_plan_is_weighted_not_a_count_ratio():
+    from app.services.slm import progress_in_plan
+
+    # درس(۰٫۲۵) و کوییز(۰٫۱۰) انجام‌شده، تمرین(۰٫۳۰) انجام‌نشده
+    entries = [("lesson", True, True), ("quiz", True, True), ("practice", False, True)]
+    expected = round(100.0 * (0.25 + 0.10) / (0.25 + 0.10 + 0.30), 1)
+    assert progress_in_plan(entries) == expected
+    # نسبت سادهٔ تعداد (۲ از ۳ = ۶۶٫۷) فرق دارد ⇒ واقعاً وزن‌دار است
+    assert progress_in_plan(entries) != 66.7
+
+    # همه انجام ⇒ ۱۰۰ و هیچ‌کدام ⇒ ۰
+    assert progress_in_plan([("lesson", True, True), ("practice", True, True)]) == 100.0
+    assert progress_in_plan([("lesson", False, True), ("practice", False, True)]) == 0.0
+
+    # کارهای سررسیدنشده (آینده) در مخرج وارد نمی‌شوند
+    assert progress_in_plan([("practice", False, False)]) == 0.0
+    assert progress_in_plan([("practice", True, False), ("lesson", True, True)]) == 100.0
+
+    # بدون ورودی یا فقط با کارهای بدون وزن ⇒ صفر (خطا نمی‌دهد)
+    assert progress_in_plan([]) == 0.0
+    assert progress_in_plan([("spaced_review", False, True)]) == 0.0

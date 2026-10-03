@@ -40,8 +40,15 @@ type Overview = {
   school: { id: number; name: string; type: string; ownership: string };
   students_count: number;
   avg_effective_mastery: number | null;
+  avg_retention: number | null;
+  growth_vs_prev: number | null;
   needs_intervention: number;
+  critical_topics_count: number;
+  drop_classes_count: number;
+  drop_class_ids: number[];
+  teachers_flagged_count: number;
   status_counts: Record<string, number>;
+  note_fa?: string;
 };
 
 type CompareRow = {
@@ -156,11 +163,14 @@ function AdminInner() {
   const [error, setError] = useState("");
   const [role, setRole] = useState("");
   const [loading, setLoading] = useState(true);
+  // مدرسهٔ جاری از /admin/my/schools می‌آید (نه school/1 hardcode)
+  const [schoolId, setSchoolId] = useState<number | null>(null);
+  const [mySchools, setMySchools] = useState<{ id: number; name: string }[]>([]);
 
   // تأیید/رد استخدام فقط سطح ناحیه و بالاتر (بک‌اند scope ناحیه را چک می‌کند)
   const canDecide = role === "district_admin" || role === "province_admin" || role === "platform_admin";
 
-  const loadAll = useCallback(async () => {
+  const loadAll = useCallback(async (sid: number | null = null) => {
     if (!getToken()) {
       window.location.href = "/login";
       return;
@@ -168,12 +178,29 @@ function AdminInner() {
     try {
       const me = await api<{ role: string }>("/auth/me");
       setRole(me.role);
+
+      // مدرسه/مدرسه‌های در دیدِ من (قبلا school/1 hardcode بود)
+      let target = sid;
+      if (target === null) {
+        const mine = await api<{ schools: { id: number; name: string }[]; default_id: number | null }>(
+          "/admin/my/schools"
+        );
+        setMySchools(mine.schools);
+        target = mine.default_id;
+        setSchoolId(target);
+      }
+      if (target === null) {
+        setError("هیچ مدرسه‌ای در حوزه دسترسی شما یافت نشد.");
+        setLoading(false);
+        return;
+      }
+
       // هر بخش مستقل واکشی می‌شود تا 403 یک بخش (حوزه دسترسی)، کل صفحه را نیندازد
       const parts = await Promise.allSettled([
-        api<Overview>("/admin/school/1/overview"),
-        api<CompareData>("/admin/school/1/classes-compare/math"),
-        api<{ flags: Flag[] }>("/admin/school/1/attention-flags"),
-        api<{ profiles: TeacherProfile[] }>("/admin/school/1/teachers"),
+        api<Overview>(`/admin/school/${target}/overview`),
+        api<CompareData>(`/admin/school/${target}/classes-compare/math`),
+        api<{ flags: Flag[] }>(`/admin/school/${target}/attention-flags`),
+        api<{ profiles: TeacherProfile[] }>(`/admin/school/${target}/teachers`),
       ]);
       if (parts[0].status === "fulfilled") setOv(parts[0].value);
       if (parts[1].status === "fulfilled") setCmp(parts[1].value);
@@ -193,7 +220,7 @@ function AdminInner() {
   }, []);
 
   useEffect(() => {
-    loadAll();
+    loadAll(null);
   }, [loadAll]);
 
   async function openDiagnosis(classId: number) {
@@ -318,9 +345,30 @@ function AdminInner() {
           crumbs={[{ label: "دانشیار" }, { label: "مدیریت" }, { label: "مدرسه" }]}
           badge={role ? <Badge tone="primary" dot>{role === "district_admin" ? "دید ناحیه" : "دید مدرسه"}</Badge> : undefined}
           actions={
-            <Button variant="ghost" size="sm" icon={<IconRefresh size={15} />} onClick={() => { setLoading(true); loadAll(); }}>
-              به‌روزرسانی
-            </Button>
+            <div className="flex items-center gap-2">
+              {mySchools.length > 1 && (
+                <select
+                  className="rounded-xl border border-line bg-surface px-2.5 py-1.5 text-xs font-semibold text-ink"
+                  value={schoolId ?? ""}
+                  onChange={(e) => {
+                    const next = Number(e.target.value);
+                    setSchoolId(next);
+                    setLoading(true);
+                    loadAll(next);
+                  }}
+                  aria-label="انتخاب مدرسه"
+                >
+                  {mySchools.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <Button variant="ghost" size="sm" icon={<IconRefresh size={15} />} onClick={() => { setLoading(true); loadAll(schoolId); }}>
+                به‌روزرسانی
+              </Button>
+            </div>
           }
         />
 
@@ -347,13 +395,56 @@ function AdminInner() {
                     icon={<IconTarget size={20} />}
                     hint="همه مباحث"
                   />
+                  <StatCard
+                    label="رشد نسبت به دوره قبل"
+                    value={ov.growth_vs_prev !== null ? `${ov.growth_vs_prev > 0 ? "+" : ""}${fa(ov.growth_vs_prev, 1)}٪` : "—"}
+                    tone={ov.growth_vs_prev !== null && ov.growth_vs_prev < 0 ? "danger" : "accent"}
+                    icon={<IconChart size={20} />}
+                    hint={ov.note_fa ?? "تغییر تسط مؤثر"}
+                  />
+                  <StatCard
+                    label="ماندگاری"
+                    value={ov.avg_retention !== null ? `${fa(ov.avg_retention * 100)}٪` : "—"}
+                    tone="sky"
+                    icon={<IconLayers size={20} />}
+                    hint="میانگین R مباحث"
+                  />
                   <StatCard label="نیازمند مداخله" value={fa(ov.needs_intervention)} tone="danger" icon={<IconAlert size={20} />} hint="برنامه ترمیمی لازم دارد" />
                   <StatCard
-                    label="مباحث بحرانی/ضعیف"
-                    value={fa((ov.status_counts.critical ?? 0) + (ov.status_counts.weak ?? 0))}
+                    label="مباحث بحرانی"
+                    value={fa(ov.critical_topics_count)}
                     tone="warning"
                     icon={<IconLayers size={20} />}
+                    hint="تعداد مبحث بحرانیِ یکتا"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setTab("compare")}
+                    className="block w-full text-right"
+                    title="برای ریشه‌یابی به مقایسه کلاس‌ها بروید"
+                  >
+                    <StatCard
+                      label="کلاس دارای افت"
+                      value={fa(ov.drop_classes_count)}
+                      tone="danger"
+                      icon={<IconShield size={20} />}
+                      hint="≥۱۰ واحد زیر میانگین هم‌درس — کلیک برای ریشه‌یابی"
+                    />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTab("flags")}
+                    className="block w-full text-right"
+                    title="برای دیدن پرچم‌ها به تب «نیازمند بررسی» بروید"
+                  >
+                    <StatCard
+                      label="معلم نیازمند بررسی"
+                      value={fa(ov.teachers_flagged_count)}
+                      tone="warning"
+                      icon={<IconShield size={20} />}
+                      hint="پرچم هشداری، نه ارزیابی — کلیک برای مشاهده"
+                    />
+                  </button>
                 </section>
 
                 <section className="grid gap-5 lg:grid-cols-3">
@@ -443,22 +534,22 @@ function AdminInner() {
             )}
 
             {/* ثبت‌نام دانش‌آموزان */}
-            {tab === "admissions" && <AdmissionsSection schoolId={ov?.school.id ?? null} />}
+            {tab === "admissions" && <AdmissionsSection schoolId={schoolId} />}
 
             {/* رکورد کامل: همه دانش‌آموزان با جایگاه کلاسی + کلاس‌ها + معلمان */}
-            {tab === "roster" && <RosterSection schoolId={ov?.school.id ?? null} />}
+            {tab === "roster" && <RosterSection schoolId={schoolId} />}
 
             {/* شیفت‌های مدرسه + برنامه هفتگی هر کلاس + کادر آموزشی */}
-            {tab === "schedule" && <ScheduleSection schoolId={ov?.school.id ?? null} />}
+            {tab === "schedule" && <ScheduleSection schoolId={schoolId} />}
 
             {/* §8 مقایسه معلم با معلم — با احتیاط */}
-            {tab === "teachercmp" && <TeachersCompareSection schoolId={ov?.school.id ?? null} />}
+            {tab === "teachercmp" && <TeachersCompareSection schoolId={schoolId} />}
 
             {/* §13 نمای فردی دانش‌آموز */}
-            {tab === "students" && <StudentViewSection schoolId={ov?.school.id ?? null} />}
+            {tab === "students" && <StudentViewSection schoolId={schoolId} />}
 
             {/* §16/§18 دستیار هوشمند مدیر مدرسه */}
-            {tab === "copilot" && <SchoolCopilotSection schoolId={ov?.school.id ?? null} />}
+            {tab === "copilot" && <SchoolCopilotSection schoolId={schoolId} />}
 
             {/* §6 تشخیص چندعاملی */}
             <Modal

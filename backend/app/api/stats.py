@@ -1,15 +1,19 @@
 """Province / ministry APIs (roadmap phase 7): تجمیع‌های province /
 national_topic_stats + نمای کلان — با قاعده حداقل جمعیت ۱۰ + حوزه تماس‌گیرنده
 (/geo/me برای پنل استان در فرانت‌اند)."""
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AuthUser, get_current_user, require_permission
 from app.core.db import get_db
+from app.models.district_reports import DistrictReport  # noqa: F401  (register tables)
 from app.models.org import ClassRoom, District, Employee, Province, School, SchoolAssignment
 from app.services import insights, stats_service
-from app.services.rbac_service import user_scopes
+from app.services.rbac_service import log_action, user_scopes
 
 router = APIRouter(prefix="/geo", tags=["province", "ministry"])
 
@@ -157,3 +161,123 @@ async def national_refresh(
     per_province = [await stats_service.recompute_topic_stats(db, p.id) for p in provinces]
     await db.commit()
     return {"national": national, "provinces": per_province}
+
+
+# ------------- §32 دریافت گزارش ناحیه‌ها در پنل استان -------------
+
+REPORT_STATUS_FA = {
+    "draft": "پیش‌نویس",
+    "submitted": "ارسال‌شده به استان",
+    "reviewed": "در حال بازبینی",
+    "returned": "برگشت‌خورده",
+    "approved": "تأییدشده",
+}
+
+
+@router.get("/province/{province_id}/district-reports")
+async def province_district_reports(
+    province_id: int,
+    status: str | None = None,
+    current: AuthUser = Depends(require_permission("view_province_analytics", scope_type="province", scope_param="province_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """گزارش‌های ارسال‌شده ناحیه‌های این استان (§32) — فقط ناحیه‌های همین
+    استان؛ فیلتر اختیاری وضعیت."""
+    if await db.get(Province, province_id) is None:
+        raise HTTPException(404, "استان یافت نشد")
+    district_ids = [
+        d.id
+        for d in (
+            (await db.execute(select(District).where(District.province_id == province_id))).scalars()
+        )
+    ]
+    rows = (
+        await db.execute(
+            select(DistrictReport)
+            .where(DistrictReport.district_id.in_(district_ids))
+            .order_by(DistrictReport.created_at.desc())
+        )
+    ).scalars().all() if district_ids else []
+    if status is not None:
+        rows = [r for r in rows if r.status == status]
+    names = {
+        d.id: d.name
+        for d in ((await db.execute(select(District).where(District.id.in_(district_ids)))).scalars()
+                  if district_ids else [])
+    }
+    return {
+        "province_id": province_id,
+        "total": len(rows),
+        "reports": [
+            {
+                "id": r.id,
+                "district_id": r.district_id,
+                "district_name": names.get(r.district_id),
+                "title_fa": r.title_fa,
+                "period_start": r.period_start.isoformat(),
+                "period_end": r.period_end.isoformat(),
+                "status": r.status,
+                "status_fa": REPORT_STATUS_FA.get(r.status, r.status),
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "submitted_at": r.submitted_at.isoformat() if r.submitted_at else None,
+                "reviewed_at": r.reviewed_at.isoformat() if r.reviewed_at else None,
+                "review_note": r.review_note,
+            }
+            for r in rows
+        ],
+    }
+
+
+class ReportDecisionIn(BaseModel):
+    decision: str  # return | approve
+    note_fa: str | None = None
+
+
+@router.post("/province/{province_id}/district-reports/{report_id}/decision")
+async def province_district_report_decision(
+    province_id: int,
+    report_id: int,
+    body: ReportDecisionIn,
+    current: AuthUser = Depends(require_permission("view_province_analytics", scope_type="province", scope_param="province_id")),
+    db: AsyncSession = Depends(get_db),
+):
+    """تصمیم استان روی گزارش ناحیه (§32): برگشت برای اصلاح (returned) یا
+    تأیید (approved) — با ممیزی province_report_returned / approved."""
+    if await db.get(Province, province_id) is None:
+        raise HTTPException(404, "استان یافت نشد")
+    report = await db.get(DistrictReport, report_id)
+    if report is None:
+        raise HTTPException(404, "گزارش یافت نشد")
+    district = await db.get(District, report.district_id)
+    if district is None or district.province_id != province_id:
+        raise HTTPException(404, "گزارش متعلق به ناحیه‌ای در این استان نیست")
+    if report.status != "submitted":
+        raise HTTPException(409, "فقط گزارش ارسال‌شده قابل بررسی است")
+    if body.decision not in ("return", "approve"):
+        raise HTTPException(400, "تصمیم نامعتبر است (return | approve)")
+    if body.decision == "return" and not (body.note_fa or "").strip():
+        raise HTTPException(400, "برای برگشت گزارش، دلیل اصلاح الزامی است")
+
+    report.status = "returned" if body.decision == "return" else "approved"
+    report.reviewed_by = current.id
+    report.reviewed_at = datetime.utcnow()
+    report.review_note = (body.note_fa or "").strip() or None
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="province_report_returned" if body.decision == "return" else "province_report_approved",
+        entity_type="district_report",
+        entity_id=report.id,
+        detail=f"province={province_id} note={report.review_note or '-'}",
+    )
+    await db.commit()
+    return {
+        "ok": True,
+        "report": {
+            "id": report.id,
+            "status": report.status,
+            "status_fa": REPORT_STATUS_FA.get(report.status, report.status),
+            "reviewed_at": report.reviewed_at.isoformat() if report.reviewed_at else None,
+            "review_note": report.review_note,
+        },
+    }

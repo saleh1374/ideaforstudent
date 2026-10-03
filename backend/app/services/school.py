@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.assessment import AttemptAnswer
-from app.models.catalog import Topic
+from app.models.catalog import Book, Chapter, Topic
 from app.models.org import (
     ClassRoom,
     ClassTeacherAssignment,
@@ -23,7 +23,7 @@ from app.models.org import (
     StudentProfile,
     User,
 )
-from app.models.slm import ErrorRecord, StudentTopicState
+from app.models.slm import ErrorRecord, PlanTask, StudentTopicState
 from app.services.slm import status_of
 from app.services.teacher import NEED_FA, NEED_ACTION_FA
 
@@ -283,6 +283,143 @@ CAUSE_SEVERITY_FA = {
     "guess": "حدس — سنجش مجدد با شواهد معتبرتر",
 }
 
+# شش علت خطای سند دانش‌آموز + دو عامل رفتاری/سازمانیِ تازه در این سطح (§6.1)
+DIAGNOSIS_CAUSES = tuple(CAUSE_SEVERITY_FA)
+
+
+async def _class_student_ids(db: AsyncSession, class_id: int) -> list[int]:
+    return [
+        p.user_id
+        for p in (
+            await db.execute(select(StudentProfile).where(StudentProfile.class_id == class_id))
+        ).scalars()
+    ]
+
+
+async def diagnosis_factors(db: AsyncSession, class_id: int) -> dict:
+    """§6.1 عوامل تشخیص چندعاملی: شش علت خطا + «عدم انجام تمرین» و «غیبت»
+    (رفتاری) + «مشکلات آموزشی کلاس» (سازمانی) — هر عامل با شاخص عددی یا
+    نبودِ دادهٔ صریح (هرگز صفر ساختگی). سه حالت الف/ب/ج هم از همین شواهد
+    ساخته می‌شود تا نتیجه‌گیری شتاب‌زده نشود."""
+    settings = get_settings()
+    summary = await class_subject_summary(db, class_id)
+    causes: dict = summary["error_causes"]
+    total = summary["total_errors"]
+    student_ids = await _class_student_ids(db, class_id)
+
+    factors: list[dict] = []
+    for cause in DIAGNOSIS_CAUSES:
+        n = causes.get(cause, 0)
+        factors.append(
+            {
+                "key": cause,
+                "group": "cause",
+                "label_fa": cause,
+                "label_full_fa": CAUSE_SEVERITY_FA[cause],
+                "source_fa": "از سند دانش‌آموز",
+                "count": n,
+                "share_pct": round(100.0 * n / total, 1) if total else 0.0,
+                "has_data": total > 0,
+            }
+        )
+
+    # ---- عامل رفتاری ۱: عدم انجام تمرین (نرخ تکمیل کارهای برنامه) ----
+    tasks = (
+        (await db.execute(select(PlanTask).where(PlanTask.student_user_id.in_(student_ids)))).scalars().all()
+        if student_ids
+        else []
+    )
+    done = sum(1 for t in tasks if t.status == "done")
+    completion_pct = round(100.0 * done / len(tasks), 1) if tasks else None
+    factors.append(
+        {
+            "key": "no_practice",
+            "group": "behavioral",
+            "label_fa": "عدم انجام تمرین",
+            "source_fa": "رفتاری — جدید در این سطح",
+            "value_pct": completion_pct,
+            "count": len(tasks) - done,
+            "has_data": bool(tasks),
+            "note_fa": "نرخ تکمیل کارهای برنامهٔ یادگیری هر دانش‌آموز" if tasks else "هنوز کار برنامه‌ای برای این کلاس ثبت نشده است",
+        }
+    )
+
+    # ---- عامل رفتاری ۲: غیبت (دادهٔ حضور هنوز در سامانه نیست — صریح و بدون حدس) ----
+    factors.append(
+        {
+            "key": "absence",
+            "group": "behavioral",
+            "label_fa": "غیبت",
+            "source_fa": "رفتاری — جدید در این سطح",
+            "value_pct": None,
+            "count": None,
+            "has_data": False,
+            "note_fa": "حضور و غیاب هنوز در سامانه ثبت نمی‌شود؛ در صورت اتصال، همین عامل عددی می‌شود.",
+        }
+    )
+
+    # ---- عامل سازمانی: مشکلات آموزشی کلاس (از مباحث ضعیفِ شناسایی‌شده) ----
+    weak_topics = summary["weak_topics"]
+    factors.append(
+        {
+            "key": "class_issues",
+            "group": "organizational",
+            "label_fa": "مشکلات آموزشی کلاس",
+            "source_fa": "سازمانی — بخش مشترک کلاس",
+            "count": len(weak_topics),
+            "value_pct": None,
+            "has_data": bool(weak_topics),
+            "note_fa": "مباحثی که بخش بزرگی از کلاس همزمان در آن زیر آستانه‌اند",
+        }
+    )
+
+    # ---- سه حالت نمونهٔ §6.1 (الف/ب/ج) ----
+    states = await _states_for_class(db, class_id)
+    with_data = [s for s in states if s.evidence_count >= settings.evidence_min_for_status]
+    relapsed = sum(1 for e in await _errors_for_class(db, class_id) if e.status == "relapsed")
+    dominant = max(causes.items(), key=lambda kv: kv[1]) if causes else None
+    dominant_share = round(100.0 * dominant[1] / total, 1) if (dominant and total) else 0.0
+
+    case_key = None
+    case_fa = None
+    explanation_fa = "در حال حاضر داده‌ها الگوی قطعی نشان نمی‌دهند؛ پایش ادامه یابد."
+    if completion_pct is not None and completion_pct <= 20.0 and len(tasks) >= 3:
+        case_key = "a"
+        case_fa = "حالت الف"
+        explanation_fa = (
+            f"{round(100 - completion_pct)}٪ دانش‌آموزان تمرین را انجام نداده‌اند — "
+            "احتمالاً مسئله صرفاً تدریس نیست؛ مشارکت و انجام تکلیف بررسی شود."
+        )
+    elif dominant is not None and dominant_share >= 60.0:
+        case_key = "b"
+        case_fa = "حالت ب"
+        explanation_fa = (
+            f"تمرین‌ها انجام شده، اما {round(dominant_share)}٪ خطاها یک کج‌فهمی مشترک "
+            f"«{dominant[0]}» دارند — نیازمند بررسی آموزشی محتوا/تدریس."
+        )
+    elif relapsed >= 2 and with_data:
+        low_growth = 0
+        for st in with_data:
+            hist = st.history or []
+            if len(hist) >= 2:
+                delta = st.effective_mastery - float(hist[0].get("e", hist[0].get("E", st.effective_mastery)))
+                if delta < 1.0:
+                    low_growth += 1
+        if low_growth:
+            case_key = "c"
+            case_fa = "حالت ج"
+            explanation_fa = (
+                f"{low_growth} دانش‌آموز عقب‌ماندگی چند آزمونی و رشد کم حتی بعد از مداخله دارند — "
+                "هشدار مدیریتی قوی‌تر؛ بررسی حضوری لازم است."
+            )
+
+    return {
+        "factors": factors,
+        "case": case_key,
+        "case_fa": case_fa,
+        "explanation_fa": explanation_fa,
+    }
+
 
 async def multi_factor_diagnosis(db: AsyncSession, class_id: int) -> dict:
     """§6 تشخیص چندعاملی ضعف: از توزیع علت خطا تا عوامل زمینه‌ای.
@@ -311,6 +448,11 @@ async def multi_factor_diagnosis(db: AsyncSession, class_id: int) -> dict:
     for wt in summary["weak_topics"]:
         actions.append(f"مبحث «{wt['title']}»: {wt['weak_students']} دانش‌آموز نیازمند توجه — ریشه‌یابی پیشنهاد شود")
 
+    # §6.1 عوامل + توضیح سه‌حالته (الف/ب/ج) — بدون حذف هیچ‌کدام از کلیدهای قبلی
+    extra = await diagnosis_factors(db, class_id)
+    if extra["case_fa"]:
+        actions.insert(0, f"{extra['case_fa']}: {extra['explanation_fa']}")
+
     return {
         "class_id": class_id,
         "class_mastery": summary["avg_mastery"],
@@ -318,7 +460,219 @@ async def multi_factor_diagnosis(db: AsyncSession, class_id: int) -> dict:
         "total_errors": total,
         "weak_topics": summary["weak_topics"],
         "grounded_actions_fa": actions or ["داده کافی برای تشخیص وجود ندارد"],
+        "factors": extra["factors"],
+        "case": extra["case"],
+        "case_fa": extra["case_fa"],
+        "explanation_fa": extra["explanation_fa"],
         "note_fa": "هیچ‌کدام از این نتایج حکم درباره کیفیت تدریس نیست؛ ورودی بررسی مدیریتی است.",
+    }
+
+
+# ==============================================================================
+# §14 تحلیل در سطح پایه + §15 نبض مدرسه (چندمحوری، نه یک عدد)
+# ==============================================================================
+
+
+async def grade_analysis(db: AsyncSession, school_id: int, grade: str) -> dict:
+    """§14 «پایه دهم را بررسی کن»: تسط/ماندگاری هر درسِ همان پایه در همین
+    مدرسه + مباحث بحرانی هر درس (همان رادار مباحث، این‌بار در سطح پایه).
+    محدودهٔ درس از روی کتاب همان پایه تعیین می‌شود."""
+    classes = [c for c in await _school_classes(db, school_id) if c.grade == grade]
+    student_ids = [
+        p.user_id
+        for p in (
+            await db.execute(
+                select(StudentProfile).where(StudentProfile.school_id == school_id)
+            )
+        ).scalars()
+        if p.class_id in {c.id for c in classes}
+    ]
+    if not classes:
+        return {
+            "school_id": school_id,
+            "grade": grade,
+            "subjects": [],
+            "classes": [],
+            "note_fa": "کلاسی برای این پایه در این مدرسه ثبت نشده است.",
+        }
+
+    # کتاب‌های این پایه → محدودهٔ مباحث هر درس
+    rows = (
+        (
+            await db.execute(
+                select(Topic, Chapter, Book)
+                .join(Chapter, Topic.chapter_id == Chapter.id)
+                .join(Book, Chapter.book_id == Book.id)
+                .where(Book.grade == grade)
+            )
+        ).all()
+        if student_ids
+        else []
+    )
+    by_subject: dict[str, dict[int, list]] = {}
+    for topic, _ch, book in rows:
+        by_subject.setdefault(book.subject, {}).setdefault(topic.id, [])
+
+    if by_subject and student_ids:
+        topic_ids = [tid for m in by_subject.values() for tid in m]
+        states = (
+            await db.execute(
+                select(StudentTopicState).where(
+                    StudentTopicState.student_user_id.in_(student_ids),
+                    StudentTopicState.topic_id.in_(topic_ids),
+                )
+            )
+        ).scalars().all()
+        for st in states:
+            bucket = None
+            for _subject, topics in by_subject.items():
+                if st.topic_id in topics:
+                    bucket = topics
+                    break
+            if bucket is not None:
+                bucket[st.topic_id].append(st)
+
+    titles = await _topic_titles(db)
+    settings = get_settings()
+    subjects_out: list[dict] = []
+    for subject, topic_map in sorted(by_subject.items()):
+        states_all = [st for sts in topic_map.values() for st in sts]
+        with_data = [st for st in states_all if st.evidence_count >= settings.evidence_min_for_status]
+        mastery_vals = [st.effective_mastery for st in with_data]
+        retention_vals = [st.retention for st in with_data]
+        weak_counter: Counter[int] = Counter()
+        for st in states_all:
+            if status_of(st.effective_mastery, st.evidence_count) in ("critical", "weak"):
+                weak_counter[st.topic_id] += 1
+        subjects_out.append(
+            {
+                "subject": subject,
+                "avg_mastery": round(sum(mastery_vals) / len(mastery_vals), 1) if mastery_vals else None,
+                "avg_retention": round(sum(retention_vals) / len(retention_vals), 3) if retention_vals else None,
+                "students_with_data": len({st.student_user_id for st in with_data}),
+                "critical_topics": [
+                    {"topic_id": tid, "title": titles.get(tid, f"#{tid}"), "students": n}
+                    for tid, n in weak_counter.most_common(3)
+                ],
+            }
+        )
+    subjects_out.sort(key=lambda r: (r["avg_mastery"] is None, r["avg_mastery"] if r["avg_mastery"] is not None else 0))
+
+    return {
+        "school_id": school_id,
+        "grade": grade,
+        "classes": [{"id": c.id, "name": c.name} for c in classes],
+        "subjects": subjects_out,
+        "note_fa": "محدودهٔ هر درس از کتاب همان پایه تعیین می‌شود؛ روی هر درس می‌توان مباحث بحرانی همان درس را باز کرد.",
+    }
+
+
+def _axis(key: str, label_fa: str, value, status_fa: str, detail_fa: str, unit: str = "") -> dict:
+    return {
+        "key": key,
+        "label_fa": label_fa,
+        "value": value,
+        "unit": unit,
+        "status_fa": status_fa,
+        "detail_fa": detail_fa,
+    }
+
+
+async def school_pulse(db: AsyncSession, school_id: int) -> dict:
+    """§15 نبض مدرسه: چند محور مستقل (یادگیری، تسط، ماندگاری، مشارکت،
+    ترمیم/عقب‌ماندگی) — هرگز در یک امتیاز ۰ تا ۱۰۰ خلاصه نمی‌شود."""
+    settings = get_settings()
+    student_ids = [
+        p.user_id
+        for p in (await db.execute(select(StudentProfile).where(StudentProfile.school_id == school_id))).scalars()
+    ]
+    states = (
+        (await db.execute(select(StudentTopicState).where(StudentTopicState.student_user_id.in_(student_ids)))).scalars()
+        if student_ids
+        else []
+    )
+    with_data = [s for s in states if s.evidence_count >= settings.evidence_min_for_status]
+
+    mastery_vals = [s.effective_mastery for s in with_data]
+    avg_mastery = round(sum(mastery_vals) / len(mastery_vals), 1) if mastery_vals else None
+    retention_vals = [s.retention for s in with_data]
+    avg_retention = round(sum(retention_vals) / len(retention_vals), 3) if retention_vals else None
+
+    deltas = [
+        s.effective_mastery - float(s.history[0].get("e", s.history[0].get("E", s.effective_mastery)))
+        for s in with_data
+        if len(s.history or []) >= 2
+    ]
+    growth = round(sum(deltas) / len(deltas), 1) if deltas else None
+
+    participating = len({s.student_user_id for s in with_data})
+    participation_pct = round(100.0 * participating / len(student_ids), 1) if student_ids else None
+
+    status_counts = {"critical": 0, "weak": 0, "consolidating": 0, "mastered": 0, "unknown": 0}
+    for s in states:
+        status_counts[status_of(s.effective_mastery, s.evidence_count)] += 1
+    behind = status_counts["critical"] + status_counts["weak"]
+    behind_pct = round(100.0 * behind / len(states), 1) if states else None
+
+    tasks = (
+        (await db.execute(select(PlanTask).where(PlanTask.student_user_id.in_(student_ids)))).scalars().all()
+        if student_ids
+        else []
+    )
+    completion_pct = (
+        round(100.0 * sum(1 for t in tasks if t.status == "done") / len(tasks), 1) if tasks else None
+    )
+
+    axes = [
+        _axis(
+            "learning",
+            "یادگیری",
+            growth,
+            "رو به رشد" if (growth or 0) > 1.0 else ("نیازمند توجه" if (growth is not None and growth < 0) else "ثابت"),
+            "تغییر میانگین تسط مؤثر نسبت به نخستین ثبت هر مبحث",
+            "واحد",
+        ),
+        _axis(
+            "mastery",
+            "تسط",
+            avg_mastery,
+            "مناسب" if (avg_mastery or 0) >= 65 else ("نیازمند توجه" if avg_mastery is not None else "بدون داده"),
+            f"{status_counts['mastered']} مبحث مسلط، {behind} مبحث زیر آستانه",
+            "٪",
+        ),
+        _axis(
+            "retention",
+            "ماندگاری",
+            round(avg_retention * 100, 1) if avg_retention is not None else None,
+            "مناسب" if (avg_retention or 0) >= 0.7 else "نیازمند توجه",
+            "میانگین ماندگاری مباحث دارای شواهد کافی",
+            "٪",
+        ),
+        _axis(
+            "participation",
+            "مشارکت",
+            participation_pct,
+            "مناسب" if (participation_pct or 0) >= 70 else ("عقب‌مانده" if participation_pct is not None else "بدون داده"),
+            f"نرخ تکمیل تمرین: {completion_pct if completion_pct is not None else '—'}٪",
+            "٪",
+        ),
+        _axis(
+            "repair",
+            "ترمیم/عقب‌ماندگی",
+            behind,
+            "عقب‌مانده" if behind_pct is not None and behind_pct >= 40 else ("نیازمند توجه" if behind else "مناسب"),
+            f"{status_counts['critical']} بحرانی و {status_counts['weak']} ضعیف از {len(states)} رکورد مبحث",
+            "مورد",
+        ),
+    ]
+
+    return {
+        "school_id": school_id,
+        "axes": axes,
+        "single_score": None,
+        "students": len(student_ids),
+        "status_counts": status_counts,
+        "note_fa": "نبض مدرسه چندمحوری است و هرگز به یک امتیاز مصنوعی خلاصه نمی‌شود تا واقعیت بیش‌ازحد ساده نشود.",
     }
 
 

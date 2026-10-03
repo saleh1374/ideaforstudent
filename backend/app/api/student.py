@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AuthUser, get_current_user
@@ -11,12 +11,22 @@ from app.core.config import get_settings
 from app.core.db import get_db
 from sqlalchemy.orm import selectinload
 
-from app.models.assessment import AttemptAnswer, Exam, ExamAttempt, ExamItem
+from app.models.assessment import AttemptAnswer, AttemptDraft, Exam, ExamAttempt, ExamItem
 from app.models.catalog import Book, Chapter, Period, Topic
+from app.models.content import TopicQuestion
 from app.models.org import StudentProfile
 from app.models.slm import ErrorRecord, PlanTask, StudentTopicState
 from app.services import student_plan
-from app.services.assessment import submit_attempt
+from app.services.assessment import (
+    CAUSE_FA as ERROR_CAUSE_FA,
+    SECTION_FA,
+    SIX_CAUSES,
+    ensure_question_families,
+    expected_time_ms,
+    section_summary,
+    assign_sections,
+    submit_attempt,
+)
 from app.services.remediation import apply_retest_result, build_retest_exam, weak_topics_with_open_errors
 
 router = APIRouter(prefix="/student", tags=["student"])
@@ -55,12 +65,25 @@ async def home(current: AuthUser = Depends(get_current_user), db: AsyncSession =
     resolved = sum(1 for e in errors if e.status in ("resolved", "relapsed") or e.status == "open" and False)
     resolved = sum(1 for e in errors if e.status == "resolved")
 
-    # پیشرفت در برنامه (MVP: نسبت کارهای انجام‌شده امروز/دوره)
+    # پیشرفت در برنامه (§4.4): P = 100 × Σ(u_k × completed_k) / Σ(u_k × due_k)
+    # — فقط کارهای سررسیدشده تا امروز، با وزن واحدِ هر نوع کار؛ «درس» فقط وقتی
+    # انجام می‌شود که آزمونکش گذشته باشد (§3.4). به جای نسبت سادهٔ تعداد.
+    from app.services.slm import PLAN_TASK_UNIT, progress_in_plan
+
     tasks = (
         await db.execute(select(PlanTask).where(PlanTask.student_user_id == current.id))
     ).scalars().all()
-    done = sum(1 for t in tasks if t.status == "done")
-    progress_pct = round(100.0 * done / len(tasks), 1) if tasks else 0.0
+    today = date.today()
+    entries: list[tuple[str, bool, bool]] = []
+    for t in tasks:
+        unit = PLAN_TASK_UNIT.get(t.task_type)
+        if unit is None:
+            continue
+        completed = t.status == "done" and (
+            t.task_type != "lesson" or bool(t.minicheck_passed)
+        )
+        entries.append((unit, completed, t.for_date <= today))
+    progress_pct = progress_in_plan(entries)
 
     next_exam = (
         await db.execute(
@@ -161,6 +184,8 @@ async def exams(current: AuthUser = Depends(get_current_user), db: AsyncSession 
                 "opens_at": e.opens_at,
                 "closes_at": e.closes_at,
                 "item_count": len(e.exam_items),
+                # بخش‌های الف/ب آزمون تجمعی (§5.1)
+                "sections": section_summary(e),
             }
             for e in rows
         ]
@@ -176,23 +201,179 @@ async def start_exam(exam_id: int, current: AuthUser = Depends(get_current_user)
     ).scalar_one_or_none()
     if exam is None or exam.status != "published":
         raise HTTPException(404, "آزمون یافت نشد یا فعال نیست")
-    attempt = ExamAttempt(exam_id=exam.id, student_user_id=current.id, status="in_progress")
-    db.add(attempt)
-    await db.commit()
-    await db.refresh(attempt)
-    return {
-        "attempt_id": attempt.id,
-        "items": [
+
+    # شروع دوباره ⇐ ادامهٔ همان تلاش نیمه‌تمام (idempotent) — بدون ساخت
+    # attempt یتیمِ in_progress که در تاریخچه جمع می‌شود.
+    attempt = (
+        await db.execute(
+            select(ExamAttempt)
+            .where(
+                ExamAttempt.exam_id == exam.id,
+                ExamAttempt.student_user_id == current.id,
+                ExamAttempt.status == "in_progress",
+            )
+            .order_by(ExamAttempt.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    resumed = attempt is not None
+    if attempt is None:
+        attempt = ExamAttempt(exam_id=exam.id, student_user_id=current.id, status="in_progress")
+        db.add(attempt)
+        await db.commit()
+        await db.refresh(attempt)
+
+    # ---- آماده‌سازی سؤال‌ها (§5.1 / §5.3 / §5.6) ----
+    items = sorted(exam.exam_items, key=lambda ei: ei.order)
+    questions = [ei.item for ei in items if ei.item is not None]
+
+    # گروه سؤال‌های هم‌ارز (family_id) — برای بازآزمون هرگز عین سؤال قبلی (§5.8)
+    families = await ensure_question_families(db, questions)
+
+    # بخش الف/ب: بخش ب از مباحث خطادارِ همین دانش‌آموز ساخته می‌شود (§5.1)
+    error_topics = set(
+        (
+            await db.execute(
+                select(ErrorRecord.topic_id).where(ErrorRecord.student_user_id == current.id)
+            )
+        ).scalars()
+    )
+    sections = assign_sections(exam, items, error_topics)
+
+    # بازیابی ذخیرهٔ خودکار پاسخ‌ها (§5.6) — «ذخیرهٔ خودکار بعد از هر سؤال»
+    drafts = {
+        d.exam_item_id: d
+        for d in (
+            await db.execute(select(AttemptDraft).where(AttemptDraft.attempt_id == attempt.id))
+        ).scalars()
+    }
+
+    out_items = []
+    for ei in items:
+        q = ei.item
+        d = drafts.get(ei.id)
+        section = sections.get(ei.id, "A")
+        out_items.append(
             {
                 "exam_item_id": ei.id,
                 "order": ei.order,
                 "body": ei.item.body,
                 "options": ei.item.options,
                 "points": ei.points,
+                "difficulty": q.difficulty if q else None,
+                # تایمر هر سؤال از دشواری ساخته می‌شود (§5.3 expected_time ← §5.6)
+                "time_limit_s": max(1, expected_time_ms(q.difficulty if q else None) // 1000),
+                "section": section,
+                "section_title_fa": SECTION_FA.get(section, section),
+                "counts_for_board": section == "A",
+                "family_id": families.get(q.id) if q else None,
+                "draft": (
+                    {
+                        "selected": d.selected,
+                        "confidence": d.confidence,
+                        "time_spent_ms": d.time_spent_ms,
+                        "flagged_guess": bool(d.flagged_guess),
+                        "marked": bool(d.marked),
+                    }
+                    if d
+                    else None
+                ),
             }
-            for ei in exam.exam_items
-        ],
+        )
+
+    await db.commit()  # عضویت خانوادهٔ سؤال‌ها (idempotent) باید پایدار شود
+    return {
+        "attempt_id": attempt.id,
+        "resumed": resumed,
+        "saved_count": len(drafts),
+        "total_time_s": sum(i["time_limit_s"] for i in out_items),
+        "sections": section_summary(exam),
+        "items": out_items,
     }
+
+
+class DraftIn(BaseModel):
+    exam_item_id: int
+    selected: str | None = None
+    confidence: int | None = None
+    time_spent_ms: int = 0
+    flagged_guess: bool = False
+    marked: bool = False
+
+
+class SaveIn(BaseModel):
+    answers: list[DraftIn] = []
+
+
+@router.post("/exams/{exam_id}/save")
+async def save_exam_draft(
+    exam_id: int,
+    body: SaveIn,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """ذخیرهٔ خودکارِ پاسخ‌های در جریان + علامت‌گذاری «برای بازبینی» (§5.6).
+
+    upsert روی کلید (تلاش × سؤال) ⇒ ارسال دوبارهٔ یک پاسخ بی‌اثر است و با
+    تأیید نهایی، دقیقاً همین داده‌ها به ثبت پاسخ نهایی تبدیل می‌شوند."""
+    attempt = (
+        await db.execute(
+            select(ExamAttempt)
+            .where(
+                ExamAttempt.exam_id == exam_id,
+                ExamAttempt.student_user_id == current.id,
+                ExamAttempt.status == "in_progress",
+            )
+            .order_by(ExamAttempt.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if attempt is None:
+        raise HTTPException(400, "ابتدا آزمون را شروع کنید")
+
+    valid = set(
+        (
+            await db.execute(select(ExamItem.id).where(ExamItem.exam_id == exam_id))
+        ).scalars()
+    )
+    existing = {
+        d.exam_item_id: d
+        for d in (
+            await db.execute(select(AttemptDraft).where(AttemptDraft.attempt_id == attempt.id))
+        ).scalars()
+    }
+    saved = 0
+    for a in body.answers:
+        if a.exam_item_id not in valid:
+            continue
+        d = existing.get(a.exam_item_id)
+        if d is None:
+            d = AttemptDraft(
+                attempt_id=attempt.id,
+                exam_item_id=a.exam_item_id,
+                student_user_id=current.id,
+                selected=a.selected,
+                confidence=a.confidence,
+                time_spent_ms=a.time_spent_ms,
+                flagged_guess=1 if a.flagged_guess else 0,
+                marked=1 if a.marked else 0,
+            )
+            db.add(d)
+        else:
+            d.selected = a.selected
+            d.confidence = a.confidence
+            d.time_spent_ms = a.time_spent_ms
+            d.flagged_guess = 1 if a.flagged_guess else 0
+            d.marked = 1 if a.marked else 0
+        saved += 1
+    await db.commit()
+    return {
+        "ok": True,
+        "saved": saved,
+        "attempt_id": attempt.id,
+        "message_fa": "پاسخ‌ها ذخیره شد؛ بین سؤال‌ها جابه‌جا شوید و نگران از دست رفتن پاسخ نباشید.",
+    }
+
 
 
 # NOTE: endpoints commit via db.commit() — get_db closes the session
@@ -216,16 +397,32 @@ async def submit_exam(exam_id: int, body: SubmitIn, current: AuthUser = Depends(
     exam = await db.get(Exam, exam_id)
     if exam is None:
         raise HTTPException(404, "آزمون یافت نشد")
+    # تلاشِ در جریان مقدم است؛ در نبود آن، آخرین تلاش (برای پیام خطای شفاف)
     attempt = (
         await db.execute(
             select(ExamAttempt)
-            .where(ExamAttempt.exam_id == exam_id, ExamAttempt.student_user_id == current.id)
+            .where(
+                ExamAttempt.exam_id == exam_id,
+                ExamAttempt.student_user_id == current.id,
+                ExamAttempt.status == "in_progress",
+            )
             .order_by(ExamAttempt.id.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
     if attempt is None:
+        attempt = (
+            await db.execute(
+                select(ExamAttempt)
+                .where(ExamAttempt.exam_id == exam_id, ExamAttempt.student_user_id == current.id)
+                .order_by(ExamAttempt.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    if attempt is None:
         raise HTTPException(400, "ابتدا آزمون را شروع کنید")
+    if attempt.status != "in_progress":
+        raise HTTPException(409, "این آزمون قبلاً ثبت شده است")
 
     result = await submit_attempt(db, exam=exam, attempt=attempt, answers=[a.model_dump() for a in body.answers])
 
@@ -238,8 +435,82 @@ async def submit_exam(exam_id: int, body: SubmitIn, current: AuthUser = Depends(
             db, student_user_id=current.id, attempt=attempt, answers=attempt_answers
         )
 
+    # ---- امتیاز یادگیری (§8.6) — فقط برای کار واقعی، بدون امتیاز تکراری ----
+    result["xp"] = await _award_exam_xp(db, exam=exam, attempt=attempt, result=result)
+
+    # ذخیرهٔ خودکارِ این تلاش دیگر لازم نیست (تلاش تمام شده است)
+    await db.execute(delete(AttemptDraft).where(AttemptDraft.attempt_id == attempt.id))
+
     await db.commit()
     return result
+
+
+async def _award_exam_xp(db: AsyncSession, *, exam: Exam, attempt: ExamAttempt, result: dict) -> list[dict]:
+    """XP آزمون (§8.6): آزمون دوره‌ای/تجمعی ۴۰، بازآزمون قبول ۲۵ و هر پاسخ
+    درستِ تمرین/کوییز ۳ (با سقف ۳۰ XP هر مبحث در روز). تکرار برای همان تلاش
+    یا همان پاسخ، امتیاز ندارد."""
+    events: list[dict] = []
+
+    def _keep(ev: dict) -> None:
+        if ev.get("xp"):
+            events.append(ev)
+
+    if exam.exam_type in ("period_exam", "cumulative"):
+        _keep(
+            await student_plan.award_xp(
+                db,
+                attempt.student_user_id,
+                "period_exam_completed",
+                ref_type="attempt",
+                ref_id=attempt.id,
+                detail_fa=f"شرکت در آزمون «{exam.title_fa}»",
+            )
+        )
+    elif exam.exam_type == "remedial_retest":
+        s = get_settings()
+        remediation = result.get("remediation") or {}
+        passed = bool(remediation.get("resolved")) or (attempt.percent or 0) >= (
+            s.retest_pass_ratio * 100
+        )
+        if passed:
+            _keep(
+                await student_plan.award_xp(
+                    db,
+                    attempt.student_user_id,
+                    "retest_passed",
+                    ref_type="attempt",
+                    ref_id=attempt.id,
+                    detail_fa=f"قبولی در بازآزمون «{exam.title_fa}»",
+                )
+            )
+    else:
+        # سؤال‌های درستِ تمرین/کوییز — ۳ XP به ازای هر پاسخ درستِ همان مبحث
+        ei_rows = (
+            await db.execute(
+                select(ExamItem)
+                .options(selectinload(ExamItem.item))
+                .where(ExamItem.exam_id == exam.id)
+            )
+        ).scalars().all()
+        topic_by_ei = {ei.id: (ei.item.topic_id if ei.item else None) for ei in ei_rows}
+        answers = (
+            await db.execute(select(AttemptAnswer).where(AttemptAnswer.attempt_id == attempt.id))
+        ).scalars().all()
+        for a in answers:
+            if not a.is_correct:
+                continue
+            _keep(
+                await student_plan.award_xp(
+                    db,
+                    attempt.student_user_id,
+                    "practice_correct",
+                    ref_type="answer",
+                    ref_id=a.id,
+                    topic_id=topic_by_ei.get(a.exam_item_id),
+                    detail_fa=f"پاسخ درست در «{exam.title_fa}»",
+                )
+            )
+    return events
 
 
 @router.get("/retest/plan")
@@ -264,31 +535,90 @@ async def retest_build(current: AuthUser = Depends(get_current_user), db: AsyncS
 
 @router.get("/errors")
 async def error_notebook(current: AuthUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    """دفترچه خطا (§6)."""
+    """دفترچه خطا (§6) + قطعیت تشخیص علت و برچسب «نامشخص» (§6.2)."""
     rows = (
         await db.execute(select(ErrorRecord).where(ErrorRecord.student_user_id == current.id).order_by(ErrorRecord.created_at.desc()))
     ).scalars().all()
     by_cause: dict[str, int] = {}
+    errors = []
     for r in rows:
         by_cause[r.cause] = by_cause.get(r.cause, 0) + 1
-    return {
-        "errors": [
+        snap = r.item_snapshot if isinstance(r.item_snapshot, dict) else {}
+        certainty = snap.get("certainty")
+        unclear = r.cause == "unclear" or bool(snap.get("unclear"))
+        errors.append(
             {
                 "id": r.id,
                 "topic_id": r.topic_id,
                 "cause": r.cause,
+                "cause_fa": ERROR_CAUSE_FA.get(r.cause, r.cause),
+                # پیش‌بینی سیستم وقتی برچسب «نامشخص» ثبت شده یا دانش‌آموز علت را
+                # خودش اعلام کرده است (§6.2 «قطعیت زیر ۰٫۵ ⇒ از شما پرسیده می‌شود»)
+                "predicted_cause": snap.get("predicted_cause"),
+                "declared_cause": snap.get("declared_cause"),
+                "certainty": certainty,
+                "unclear": unclear,
+                "needs_reflection": unclear and not snap.get("declared_cause"),
                 "status": r.status,
                 "item": r.item_snapshot,
                 "created_at": r.created_at,
             }
-            for r in rows
-        ],
+        )
+    return {
+        "errors": errors,
         "by_cause": by_cause,
+        "six_causes_fa": {c: ERROR_CAUSE_FA.get(c, c) for c in SIX_CAUSES},
+        "note_fa": (
+            "هر خطا علت، قطعیت تشخیص و وضعیت رفع دارد؛ اگر برچسب «نامشخص» دیدید، "
+            "علت را خودتان اعلام کنید تا برنامهٔ ترمیمی دقیق شود (§6.2)."
+        ),
+    }
+
+
+class ReflectIn(BaseModel):
+    cause: str
+
+
+@router.post("/errors/{error_id}/reflect")
+async def reflect_error(
+    error_id: int,
+    body: ReflectIn,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """اعلام علت خطا توسط خود دانش‌آموز (§6.2): وقتی قطعیت تشخیص کم است،
+    برچسب «نامشخص» می‌خورد و اینجا علت نهایی را دانش‌آموز تعیین می‌کند."""
+    err = await db.get(ErrorRecord, error_id)
+    if err is None or err.student_user_id != current.id:
+        raise HTTPException(404, "خطا یافت نشد")
+    cause = (body.cause or "").strip()
+    if cause not in SIX_CAUSES:
+        raise HTTPException(400, "علت باید یکی از شش علت دفترچهٔ خطا باشد")
+    snap = dict(err.item_snapshot) if isinstance(err.item_snapshot, dict) else {}
+    snap["previous_cause"] = err.cause
+    snap["declared_cause"] = cause
+    snap["declared_at"] = datetime.now(timezone.utc).isoformat()
+    err.item_snapshot = snap
+    err.cause = cause
+    await db.commit()
+    return {
+        "ok": True,
+        "id": err.id,
+        "cause": err.cause,
+        "cause_fa": ERROR_CAUSE_FA.get(cause, cause),
+        "certainty": snap.get("certainty"),
+        "message_fa": f"علت خطا ثبت شد: {ERROR_CAUSE_FA.get(cause, cause)}؛ برنامهٔ ترمیمی بر همین اساس می‌نشیند.",
     }
 
 
 @router.get("/tasks")
 async def my_tasks(current: AuthUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    # سقف بار روزانه + توقف موقت (§4.3): کارهای فراتر از سقف به روز آزاد بعدی
+    # منتقل می‌شوند؛ فقط در صورت جابه‌جایی، تغییر ذخیره می‌شود.
+    load = await student_plan.apply_daily_load_cap(db, current.id)
+    if load.get("moved_task_ids"):
+        await db.commit()
+    pause = await student_plan.active_pause(db, current.id)
     rows = (
         await db.execute(select(PlanTask).where(PlanTask.student_user_id == current.id).order_by(PlanTask.priority.desc()))
     ).scalars().all()
@@ -302,9 +632,26 @@ async def my_tasks(current: AuthUser = Depends(get_current_user), db: AsyncSessi
                 "priority": t.priority,
                 "status": t.status,
                 "payload": t.payload,
+                "minutes": student_plan.task_minutes(t),
             }
             for t in rows
-        ]
+        ],
+        # کنترل بار برنامه (§4.3)
+        "paused": pause is not None,
+        "pause": (
+            {
+                "start_date": pause.start_date.isoformat(),
+                "end_date": pause.end_date.isoformat(),
+                "reason_fa": pause.reason_fa,
+                "days_left": (pause.end_date - date.today()).days,
+            }
+            if pause
+            else None
+        ),
+        "load": load,
+        "message_fa": (
+            student_plan.pause_message_fa(pause) if pause else load.get("cap_message_fa")
+        ),
     }
 
 
@@ -317,13 +664,30 @@ async def complete_task(task_id: int, body: TaskDoneIn, current: AuthUser = Depe
     task = await db.get(PlanTask, task_id)
     if task is None or task.student_user_id != current.id:
         raise HTTPException(404, "کار یافت نشد")
+    # توقف موقت ⇒ انجام کار ثبت نمی‌شود (§4.3)
+    pause = await student_plan.active_pause(db, current.id)
+    if pause is not None:
+        raise HTTPException(409, student_plan.pause_message_fa(pause))
     # «مطالعه شد» فقط با گذراندن آزمونک (§4.3)
     if task.task_type == "lesson" and not body.minicheck_passed:
         raise HTTPException(400, "برای تیک درس باید آزمونک را بگذرانید")
     task.status = "done"
     task.minicheck_passed = 1 if body.minicheck_passed else 0
+    # امتیاز کار یادگیری (§8.6) — کارهای بدون معادل در جدول امتیاز ندارند
+    xp = None
+    action = student_plan.TASK_XP_ACTION.get(task.task_type)
+    if action:
+        xp = await student_plan.award_xp(
+            db,
+            current.id,
+            action,
+            ref_type="task",
+            ref_id=task.id,
+            topic_id=task.topic_id,
+            detail_fa=f"انجام کار «{student_plan.TASK_TYPE_FA.get(task.task_type, task.task_type)}»",
+        )
     await db.commit()
-    return {"ok": True}
+    return {"ok": True, "xp": xp}
 
 
 def _parse_day(value: str | None, name: str) -> date | None:
@@ -391,3 +755,146 @@ async def my_schedule(
     from app.services import school_ops
 
     return await school_ops.student_schedule(db, current.id)
+
+
+# ================= بستهٔ محتوایی مبحث (§3.4) =================
+
+
+@router.get("/topics/{topic_id}/package")
+async def topic_package(
+    topic_id: int,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """بستهٔ محتوایی مبحث: درس‌نامهٔ دوسطح، نکات کلیدی، مثال حل‌شده، اشتباهات
+    رایج، تمرین پله‌ای، پیش‌نیازها، پرسش از دبیر/هوش مصنوعی و آزمونک (§3.4)."""
+    pkg = await student_plan.content_package(db, current.id, topic_id)
+    if pkg is None:
+        raise HTTPException(404, "مبحث یافت نشد")
+    # پرسش‌های خودم از دبیر دربارهٔ همین مبحث (نردبان کمک §10.1)
+    pkg["my_questions"] = [
+        {
+            "id": q.id,
+            "body": q.body,
+            "status": q.status,
+            "created_at": q.created_at,
+            "answered_at": q.answered_at,
+        }
+        for q in (
+            await db.execute(
+                select(TopicQuestion)
+                .where(
+                    TopicQuestion.student_user_id == current.id,
+                    TopicQuestion.topic_id == topic_id,
+                )
+                .order_by(TopicQuestion.id.desc())
+            )
+        ).scalars()
+    ]
+    return pkg
+
+
+class MinicheckIn(BaseModel):
+    answers: list[dict] = []  # [{item_id, selected}]
+
+
+@router.post("/topics/{topic_id}/minicheck")
+async def topic_minicheck(
+    topic_id: int,
+    body: MinicheckIn,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """آزمونک ۲ تا ۳ سؤالی مبحث (§3.4): با قبول، کار «درس» همین مبحث انجام
+    شده و در پیشرفت برنامه حساب می‌شود (بدون قبول، تیک درس نمی‌خورد)."""
+    if await db.get(Topic, topic_id) is None:
+        raise HTTPException(404, "مبحث یافت نشد")
+    result = await student_plan.grade_minicheck(db, current.id, topic_id, body.answers)
+    await db.commit()
+    return result
+
+
+class AskTeacherIn(BaseModel):
+    body: str
+
+
+@router.post("/topics/{topic_id}/ask-teacher")
+async def ask_teacher(
+    topic_id: int,
+    body: AskTeacherIn,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """پرسش نوشتاری از دبیر کالس دربارهٔ همین مبحث (§3.4 + §10.1) — وارد
+    کارتابل دبیر می‌شود؛ پاسخ در همین صفحه نمایش داده می‌شود."""
+    if await db.get(Topic, topic_id) is None:
+        raise HTTPException(404, "مبحث یافت نشد")
+    text = (body.body or "").strip()
+    if not text:
+        raise HTTPException(400, "متن پرسش خالی است")
+    profile = (
+        await db.execute(select(StudentProfile).where(StudentProfile.user_id == current.id))
+    ).scalar_one_or_none()
+    row = TopicQuestion(
+        student_user_id=current.id,
+        topic_id=topic_id,
+        class_id=profile.class_id if profile else None,
+        body=text[:2000],
+        status="sent",
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return {
+        "ok": True,
+        "question": {"id": row.id, "body": row.body, "status": row.status, "created_at": row.created_at},
+        "message_fa": "پرسش شما برای دبیر کالس ارسال شد (زمان پاسخ هدف: ۴۸ ساعت).",
+    }
+
+
+# ============ سقف بار روزانه و توقف موقت (§4.3) ============
+
+
+@router.get("/plan/status")
+async def plan_status(current: AuthUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """وضعیت کنترل برنامه: توقف موقت، سقف بار روزانه و پیام فارسی (§4.3)."""
+    status = await student_plan.plan_control_status(db, current.id)
+    if status["load"].get("moved_task_ids"):
+        await db.commit()  # جابه‌جایی کارها باید پایدار بماند
+    return status
+
+
+class PauseIn(BaseModel):
+    days: int | None = None
+    reason_fa: str | None = None
+
+
+@router.post("/plan/pause")
+async def plan_pause(
+    body: PauseIn,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """توقف موقت برنامه (§4.3): حداکثر ۱۴ روز؛ زنجیرهٔ فعالیت نمی‌شکند."""
+    result = await student_plan.pause_plan(db, current.id, days=body.days, reason_fa=body.reason_fa)
+    await db.commit()
+    return result
+
+
+@router.post("/plan/resume")
+async def plan_resume(current: AuthUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """پایان توقف + برنامهٔ جبرانی فشرده با احترام به سقف بار روزانه (§4.3)."""
+    result = await student_plan.resume_plan(db, current.id)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("reason") or "توقف فعالی وجود ندارد")
+    await db.commit()
+    return result
+
+
+# ================= امتیاز، نشان و زنجیرهٔ مطالعه (§8) =================
+
+
+@router.get("/xp")
+async def xp_summary(current: AuthUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """XP کل/امروز، زنجیرهٔ روزهای فعال، نشان‌ها و آخرین رویدادها (§8.4/§8.6/§8.7)."""
+    return await student_plan.xp_summary(db, current.id)

@@ -38,6 +38,8 @@ EXAM_TYPES_FA: dict[str, str] = {
     "remedial": "آزمون ترمیمی",
     "prerequisite": "آزمون پیش‌نیاز",
     "diagnostic": "آزمون تشخیصی",
+    "readiness": "آزمون آمادگی جامع",
+    "chapter_final": "آزمون پایان فصل",
 }
 EXAM_TYPE_KEYS = tuple(EXAM_TYPES_FA)
 
@@ -46,6 +48,14 @@ MODES_FA: dict[str, str] = {
     "personal_diagnostic": "تشخیصی شخصی (فقط SLM — بدون برد)",
 }
 MODE_KEYS = tuple(MODES_FA)
+
+# §8.3 تمرکز شخصی‌سازی هر دانش‌آموز در حالت «تشخیصی شخصی»
+FOCUS_FA: dict[str, str] = {
+    "A": "مفهوم",
+    "B": "محاسبات",
+    "C": "زمان",
+}
+FOCUS_KEYS = tuple(FOCUS_FA)
 
 ITEM_KINDS_FA: dict[str, str] = {
     "concept_base": "مفهوم پایه",
@@ -184,8 +194,42 @@ def _counts_for(exam_type: str | None) -> dict[str, int]:
         return {"concept_base": 2, "prerequisite_skill": 1, "direct_application": 2, "reasoning": 1}
     if exam_type == "diagnostic":
         return {"concept_base": 3, "prerequisite_skill": 2, "direct_application": 2, "reasoning": 1}
+    if exam_type == "readiness":
+        # آزمون آمادگی جامع (§8.1) — پیش از آزمون تجمعی، پوشش گستردهٔ فصل
+        return {"concept_base": 3, "prerequisite_skill": 3, "direct_application": 3, "reasoning": 3}
+    if exam_type == "chapter_final":
+        # آزمون پایان فصل (§8.1) — رسمی، وارد برد می‌شود
+        return {"concept_base": 3, "prerequisite_skill": 2, "direct_application": 3, "reasoning": 2}
     # class_exam (پیش‌فرض رسمی) و سایر انواع
     return {"concept_base": 3, "prerequisite_skill": 2, "direct_application": 2, "reasoning": 2}
+
+
+def focus_threshold() -> float:
+    """آستانهٔ تثبیت از تنظیمات سراسری — مبنای پیشنهاد تمرکز A/B/C."""
+    from app.core.config import get_settings
+
+    return float(get_settings().threshold_consolidating)
+
+
+def derive_focus(metrics_row: dict, threshold: float | None = None) -> str:
+    """§8.3 پیشنهاد تمرکز هر دانش‌آموز از نوع خطای غالب و تسط مؤثر او:
+    مفهومی/پیش‌نیاز ← A، محاسباتی/بی‌دقتی ← B، زمان/حدس ← C؛ بدون خطا،
+    تسط زیر آستانه ← A (نیاز به آموزش مجدد مفهوم)."""
+    if threshold is None:
+        threshold = focus_threshold()
+    causes = metrics_row.get("error_causes") or {}
+    if causes:
+        score = {
+            "A": causes.get("conceptual", 0) + causes.get("prerequisite", 0),
+            "B": causes.get("calculation", 0) + causes.get("careless", 0),
+            "C": causes.get("time_management", 0) + causes.get("guess", 0),
+        }
+        best = max(FOCUS_KEYS, key=lambda k: score.get(k, 0))
+        if score.get(best, 0) > 0:
+            return best
+    if float(metrics_row.get("mastery") or 0.0) < threshold:
+        return "A"
+    return "B"
 
 
 def _score_topic(title: str, tokens: list[str]) -> int:

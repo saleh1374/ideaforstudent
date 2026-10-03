@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.models.assistant import AiConversation, AiMessage, SemanticCache
@@ -34,7 +35,123 @@ CAUSE_HINT_FA = {
     "careless": "بعد از هر حل، ۱۰ ثانیه پاسخ را بازبینی کن؛ الگوی بی‌دقتی تکراری است.",
     "time_management": "سه سؤال را با زمان‌بندی سخت حل کن تا سرعت تصمیم‌گیری بالا برود.",
     "guess": "پاسخ حدسی را علامت زده‌ای — منبع یادگیری واقعی نیست؛ همین مبحث را دوباره تمرین کن.",
+    "unclear": "علت این خطا هنوز روشن نیست؛ در دفترچهٔ خطا یکی از شش گزینه را انتخاب کن تا برنامهٔ ترمیم دقیق شود.",
 }
+
+# ------------------------- کنترل مقدار و سکوت در آزمون (§9.2 / §9.3) -------------------------
+# «سقف پرسش روزانه برای هر دانش‌آموز» — ضمیمه: ۳۰ پرسش در روز (§3.6 هم همین را می‌گوید).
+DAILY_QUESTION_CAP = 30
+# «در طول هر آزمون رسمی یا خودسنجی زمان‌دار، دستیار خاموش است» (§9.2)
+SILENCE_HOURS = 6  # حداکثر مدتِ سکوت برای یک تلاش نیمه‌تمام (جلوگیری از سکوت دائمیِ تلاش رهاشده)
+
+
+class ChatBlocked(Exception):
+    """پرسش مسدودشده: سقف روزانه پر یا دستیار در حین آزمون خاموش است."""
+
+    def __init__(self, message_fa: str, code: str = "blocked", status: int = 403):
+        super().__init__(message_fa)
+        self.message_fa = message_fa
+        self.code = code
+        self.status = status
+
+
+async def daily_usage(db: AsyncSession, student_user_id: int) -> dict:
+    """مصرف پرسش‌های امروز (تعداد پیام‌های کاربر از نیمه‌شب تاکنون)."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    count = (
+        await db.execute(
+            select(AiMessage)
+            .join(AiConversation, AiConversation.id == AiMessage.conversation_id)
+            .where(
+                AiConversation.student_user_id == student_user_id,
+                AiMessage.role == "user",
+                AiMessage.created_at >= midnight,
+            )
+        )
+    ).scalars().all()
+    used = len(count)
+    cap = DAILY_QUESTION_CAP
+    return {
+        "used": used,
+        "cap": cap,
+        "remaining": max(0, cap - used),
+        "limit_reached": used >= cap,
+        "message_fa": (
+            f"سقف پرسش روزانهٔ دستیار ({fa_num(cap)} پرسش) پر شد؛ فردا دوباره بپرس "
+            "یا تا آن‌وقت از درس‌نامه، تمرین پله‌ای و دفترچهٔ خطا کمک بگیر (§9.3)."
+        ),
+    }
+
+
+async def exam_silence(db: AsyncSession, student_user_id: int) -> dict:
+    """سکوت خودکار حین آزمون (§9.2): تلاش نیمه‌تمامی که بازهٔ آزمونش باز است
+    و در چند ساعت اخیر شروع شده ⇒ دستیار خاموش."""
+    from datetime import timedelta
+
+    from app.models.assessment import Exam, ExamAttempt
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    attempts = (
+        await db.execute(
+            select(ExamAttempt)
+            .join(Exam, Exam.id == ExamAttempt.exam_id)
+            .where(
+                ExamAttempt.student_user_id == student_user_id,
+                ExamAttempt.status == "in_progress",
+            )
+            .options(selectinload(ExamAttempt.exam))
+        )
+    ).scalars().all()
+    for a in attempts:
+        exam = a.exam
+        if exam is None:
+            continue
+        started = a.started_at.replace(tzinfo=None) if a.started_at else now
+        opens = exam.opens_at.replace(tzinfo=None) if exam.opens_at else None
+        closes = exam.closes_at.replace(tzinfo=None) if exam.closes_at else None
+        window_open = (opens is None or opens <= now) and (closes is None or now <= closes)
+        fresh = (now - started) <= timedelta(hours=SILENCE_HOURS)
+        if window_open and fresh:
+            return {
+                "silenced": True,
+                "exam_id": exam.id,
+                "exam_title": exam.title_fa,
+                "message_fa": (
+                    f"دستیار در حین آزمون («{exam.title_fa}») خاموش است تا دسترسی یکسان بماند "
+                    "(§9.2)؛ پس از ثبت آزمون می‌توانی بپرسی."
+                ),
+            }
+    return {"silenced": False, "exam_id": None, "exam_title": None, "message_fa": None}
+
+
+async def chat_status(db: AsyncSession, student_user_id: int) -> dict:
+    """وضعیت چت: سقف روزانه + سکوت آزمون — برای نمایش در رابط دستیار."""
+    usage = await daily_usage(db, student_user_id)
+    silence = await exam_silence(db, student_user_id)
+    blocked = usage["limit_reached"] or silence["silenced"]
+    return {
+        **usage,
+        "silenced": silence["silenced"],
+        "silence_exam_title": silence["exam_title"],
+        "blocked": blocked,
+        "reason_fa": silence["message_fa"] if silence["silenced"] else (usage["message_fa"] if usage["limit_reached"] else None),
+        "note_fa": "سقف روزانهٔ پرسش و سکوت حین آزمون (§9.2 / §9.3).",
+    }
+
+
+def fa_num(n) -> str:
+    return str(n).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+
+
+async def assert_chat_allowed(db: AsyncSession, student_user_id: int) -> dict:
+    """قبل از پردازش پرسش: سقف روزانه و سکوت حین آزمون. در صورت مسدودی ChatBlocked."""
+    status = await chat_status(db, student_user_id)
+    if status["silenced"]:
+        raise ChatBlocked(status["reason_fa"], code="exam_silence", status=403)
+    if status["limit_reached"]:
+        raise ChatBlocked(status["reason_fa"], code="daily_cap", status=429)
+    return status
 
 
 def normalize_query(text: str) -> str:

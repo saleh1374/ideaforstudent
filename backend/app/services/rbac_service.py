@@ -10,7 +10,16 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.org import ClassRoom, District, School, StudentProfile, User
+from app.models.org import (
+    ClassRoom,
+    ClassTeacherAssignment,
+    District,
+    Employee,
+    School,
+    SchoolAssignment,
+    StudentProfile,
+    User,
+)
 from app.models.rbac import AuditLog, Permission, PermissionAssignment, Role, RolePermission
 
 
@@ -397,3 +406,206 @@ async def revoke_permission(db: AsyncSession, *, actor_user_id: int, assignment_
         detail=f"assignment={assignment_id}",
     )
     return {"ok": True, "reason": None, "not_found": False}
+
+
+# ==============================================================================
+# خواندن دسترسی‌ها و لاگ ممیزی (RBAC §17/§18) — رابطِ UI واگذاری و ممیزی
+# ==============================================================================
+
+SCOPE_TYPES = ("province", "district", "school", "class", "student", "national")
+
+
+async def permissions_catalog(db: AsyncSession) -> dict:
+    """فهرست کامل مجوزها، نقش‌ها و اینکه هر نقش پیش‌فرض چه مجوزهایی دارد —
+    ورودی فهرستِ انتخاب در UI واگذاری مجوز (RBAC §7)."""
+    perms = list((await db.execute(select(Permission).order_by(Permission.key))).scalars())
+    roles = list((await db.execute(select(Role).order_by(Role.id))).scalars())
+    role_perms = list((await db.execute(select(RolePermission))).scalars())
+
+    by_role: dict[int, list[str]] = {r.id: [] for r in roles}
+    for rp in role_perms:
+        by_role.setdefault(rp.role_id, []).append(rp.permission_id)
+    perm_titles = {p.id: (p.key, p.title_fa) for p in perms}
+
+    return {
+        "permissions": [{"id": p.id, "key": p.key, "title_fa": p.title_fa} for p in perms],
+        "roles": [
+            {
+                "id": r.id,
+                "key": r.key,
+                "title_fa": r.title_fa,
+                "permissions": sorted(
+                    perm_titles[pid][0] for pid in by_role.get(r.id, []) if pid in perm_titles
+                ),
+            }
+            for r in roles
+        ],
+        "scope_types": list(SCOPE_TYPES),
+        "note_fa": "حوزه‌ها: استان ← ناحیه ← مدرسه ← کلاس ← دانش‌آموز؛ تفویض هرگز بزرگ‌تر از مجوز خودِ تفویض‌کننده نمی‌شود.",
+    }
+
+
+async def _scope_school_ids(db: AsyncSession, scope_type: str, scope_id: int) -> set[int]:
+    """حوزهٔ یک تخصیص → مدارسی که آن حوزه می‌پوشاند (برای فیلتر دید بیننده)."""
+    if scope_type == "school":
+        return {scope_id}
+    if scope_type == "class":
+        cls = await db.get(ClassRoom, scope_id)
+        return {cls.school_id} if cls else set()
+    if scope_type == "student":
+        profile = (
+            await db.execute(select(StudentProfile).where(StudentProfile.user_id == scope_id))
+        ).scalar_one_or_none()
+        return {profile.school_id} if profile else set()
+    schools = list((await db.execute(select(School))).scalars())
+    if scope_type == "district":
+        return {s.id for s in schools if s.district_id == scope_id}
+    if scope_type == "province":
+        return {s.id for s in schools if s.province_id == scope_id}
+    if scope_type == "national":
+        return {s.id for s in schools}
+    return set()
+
+
+async def permission_assignments(
+    db: AsyncSession,
+    viewer_user_id: int,
+    *,
+    permission_key: str | None = None,
+) -> dict:
+    """همهٔ تخصیص‌های مجوز با نام کاربر/نقش/مجوز — فقط حوزه‌هایی که برای
+    بیننده قابل مشاهده‌اند (هیچ حوزهٔ خارج از دید برنمی‌گردد)."""
+    visible = await visible_school_ids(db, viewer_user_id, "manage_permissions")
+    if visible is None:
+        visible = await visible_school_ids(db, viewer_user_id, "view_school_analytics")
+    broad_viewer = visible is None
+
+    q = select(PermissionAssignment).order_by(PermissionAssignment.id.desc())
+    if permission_key is not None:
+        q = q.join(Permission, Permission.id == PermissionAssignment.permission_id).where(
+            Permission.key == permission_key
+        )
+    rows = list((await db.execute(q)).scalars())
+
+    perm_map = {p.id: p for p in (await db.execute(select(Permission))).scalars()}
+    role_map = {r.id: r for r in (await db.execute(select(Role))).scalars()}
+    user_ids = sorted({r.user_id for r in rows} | {r.delegated_by for r in rows if r.delegated_by} | {viewer_user_id})
+    users = {
+        u.id: u
+        for u in (await db.execute(select(User).where(User.id.in_(user_ids)))).scalars()
+    } if user_ids else {}
+
+    out: list[dict] = []
+    for pa in rows:
+        if not broad_viewer:
+            covered = await _scope_school_ids(db, pa.scope_type, pa.scope_id)
+            if not (covered & visible):
+                continue
+        perm = perm_map.get(pa.permission_id)
+        role = role_map.get(pa.role_id)
+        user = users.get(pa.user_id)
+        delegator = users.get(pa.delegated_by) if pa.delegated_by else None
+        out.append(
+            {
+                "id": pa.id,
+                "user_id": pa.user_id,
+                "user_name": user.full_name if user else f"#{pa.user_id}",
+                "username": user.username if user else None,
+                "permission": perm.key if perm else None,
+                "permission_fa": perm.title_fa if perm else None,
+                "role": role.key if role else None,
+                "role_fa": role.title_fa if role else None,
+                "scope_type": pa.scope_type,
+                "scope_id": pa.scope_id,
+                "delegated_by": pa.delegated_by,
+                "delegated_by_name": delegator.full_name if delegator else None,
+                "valid_from": pa.valid_from.isoformat() if pa.valid_from else None,
+                "valid_until": pa.valid_until.isoformat() if pa.valid_until else None,
+                "is_active": pa.is_active,
+                "created_at": pa.created_at.isoformat() if pa.created_at else None,
+            }
+        )
+    return {
+        "assignments": out,
+        "all_scopes": broad_viewer,
+        "note_fa": "تخصیص‌های خارج از حوزهٔ دید شما در این فهرست نمی‌آیند.",
+    }
+
+
+async def _actors_in_schools(db: AsyncSession, school_ids: set[int]) -> set[int]:
+    """کاربرانی که به یکی از این مدارس وابسته‌اند (دانش‌آموز، کادر، معلم کلاس)."""
+    if not school_ids:
+        return set()
+    actors: set[int] = {
+        p.user_id
+        for p in (
+            await db.execute(select(StudentProfile).where(StudentProfile.school_id.in_(school_ids)))
+        ).scalars()
+    }
+    staff_rows = (
+        await db.execute(
+            select(Employee.user_id)
+            .join(SchoolAssignment, SchoolAssignment.employee_id == Employee.id)
+            .where(SchoolAssignment.school_id.in_(school_ids))
+        )
+    ).scalars().all()
+    actors |= set(staff_rows)
+    teacher_rows = (
+        await db.execute(
+            select(ClassTeacherAssignment.teacher_user_id)
+            .join(ClassRoom, ClassRoom.id == ClassTeacherAssignment.class_id)
+            .where(ClassRoom.school_id.in_(school_ids))
+        )
+    ).scalars().all()
+    actors |= set(teacher_rows)
+    return actors
+
+
+async def audit_logs(
+    db: AsyncSession,
+    viewer_user_id: int,
+    *,
+    action: str | None = None,
+    limit: int = 100,
+) -> dict:
+    """§17/§18 خواندن لاگ ممیزی: فقط برای دارندهٔ manage_permissions و فقط در
+    حوزهٔ دیدش — بینندهٔ مدرسه‌ای رویدادهای مربوط به مدارس خودش را می‌بیند؛
+    platform_admin و حوزهٔ national همه را می‌بینند. هر بازدید خودش رویداد
+    audit_log_viewed ثبت می‌کند."""
+    visible = await visible_school_ids(db, viewer_user_id, "manage_permissions")
+    broad = visible is None
+
+    q = select(AuditLog).order_by(AuditLog.id.desc()).limit(max(1, min(limit, 500)))
+    if action is not None:
+        q = q.where(AuditLog.action == action)
+    rows = list((await db.execute(q)).scalars())
+
+    allowed_actors: set[int] | None = None
+    if not broad:
+        allowed_actors = await _actors_in_schools(db, visible)
+        allowed_actors.add(viewer_user_id)
+
+    logs = []
+    for r in rows:
+        if allowed_actors is not None:
+            if r.actor_user_id is None or r.actor_user_id not in allowed_actors:
+                continue
+        actor = await db.get(User, r.actor_user_id) if r.actor_user_id else None
+        logs.append(
+            {
+                "id": r.id,
+                "actor_id": r.actor_user_id,
+                "actor_name": actor.full_name if actor else (f"#{r.actor_user_id}" if r.actor_user_id else "سیستم"),
+                "action": r.action,
+                "entity_type": r.entity_type,
+                "entity_id": r.entity_id,
+                "detail": r.detail,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+        )
+    return {
+        "logs": logs,
+        "all_scopes": broad,
+        "count": len(logs),
+        "note_fa": "لاگ ممیزی فقط‌خواندنی است؛ هر ثبت/حذف مجوز و هر بازدید حساس خودش در آن ثبت می‌شود.",
+    }

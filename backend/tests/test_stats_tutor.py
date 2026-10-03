@@ -163,11 +163,28 @@ async def test_tutor_market_flow(client, seeded):
     )
     assert r.status_code == 200, r.text
     req_id = r.json()["request_id"]
+    assert r.json()["requires_parent_consent"] is True
 
-    # معلم تصمیم می‌گیرد
     ttok = await login(client, "tutor1")
+
+    # تا والد تأیید نکند، درخواست به معلم نمی‌رسد (§10.2-۵)
+    r = await client.get("/tutor/requests", headers=auth(ttok))
+    assert all(x["id"] != req_id for x in r.json()["requests"])
     r = await client.post(f"/tutor/requests/{req_id}/decide", headers=auth(ttok), json={"approve": True})
-    assert r.status_code == 200
+    assert r.status_code == 400
+
+    # والد رضایت می‌دهد
+    ptok = await login(client, "parent1")
+    r = await client.get("/tutor/consents", headers=auth(ptok))
+    assert any(c["request_id"] == req_id for c in r.json()["consents"])
+    r = await client.post(
+        f"/tutor/requests/{req_id}/consent", headers=auth(ptok), json={"approve": True}
+    )
+    assert r.status_code == 200, r.text
+
+    # حالا معلم تصمیم می‌گیرد
+    r = await client.post(f"/tutor/requests/{req_id}/decide", headers=auth(ttok), json={"approve": True})
+    assert r.status_code == 200, r.text
     assert r.json()["status"] == "accepted"
 
     # دوباره تصمیم → 400

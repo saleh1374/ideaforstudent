@@ -28,6 +28,7 @@ import { ExamBuilderSection } from "./exam-builder-section";
 import { ExamAnalysisSection } from "./exam-analysis-section";
 import { CopilotSection } from "./copilot-section";
 import { TeacherScheduleSection } from "./schedule-section";
+import { TeacherHomeSection } from "./home-section";
 
 type ClassInfo = {
   class_id: number;
@@ -74,7 +75,7 @@ type Group = {
   }[];
 };
 
-const VIEW_KEYS = ["class", "assessment", "builder", "analysis", "copilot", "schedule"] as const;
+const VIEW_KEYS = ["home", "class", "assessment", "builder", "analysis", "copilot", "schedule"] as const;
 
 export default function TeacherPage() {
   return (
@@ -88,7 +89,7 @@ export default function TeacherPage() {
 }
 
 function TeacherInner() {
-  const [view, setView] = useTabParam(VIEW_KEYS, "class");
+  const [view, setView] = useTabParam(VIEW_KEYS, "home");
   const [classes, setClasses] = useState<ClassInfo[]>([]);
   const [activeClass, setActiveClass] = useState<number | null>(null);
   const [radar, setRadar] = useState<RadarRow[]>([]);
@@ -248,6 +249,8 @@ function TeacherInner() {
           crumbs={[{ label: "دانشیار" }, { label: "آموزشی" }, { label: "هوش کلاس" }]}
           badge={classes.length > 0 ? <Badge tone="primary" dot>{fa(classes.length)} کلاس</Badge> : undefined}
         />
+
+        {view === "home" && <TeacherHomeSection onGoClass={(cid) => { setActiveClass(cid); setView("class"); loadClass(cid); }} onGoBuilder={() => setView("builder")} />}
 
         {view === "schedule" && <TeacherScheduleSection />}
 

@@ -81,6 +81,46 @@ class ExamItem(Base):
     item = relationship("QuestionItem")
 
 
+class AttemptDraft(Base):
+    """ذخیرهٔ خودکار پاسخ‌های در جریان + علامت‌گذاری سؤال برای بازبینی
+    (student spec §5.6: «ذخیرهٔ خودکار پاسخ‌ها بعد از هر سؤال»، «علامت‌گذاری
+    برای بازبینی»). upsert روی کلید یکتا (attempt × item) ⇒ ارسال دوباره
+    همان پاسخ بی‌اثر است (idempotent) و با تأیید نهایی، ردیف AttemptAnswer
+    از همین داده‌ها ساخته می‌شود."""
+
+    __tablename__ = "attempt_drafts"
+    __table_args__ = (UniqueConstraint("attempt_id", "exam_item_id", name="uq_draft_attempt_item"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    attempt_id: Mapped[int] = mapped_column(ForeignKey("exam_attempts.id"))
+    exam_item_id: Mapped[int] = mapped_column(ForeignKey("exam_items.id"))
+    student_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+
+    selected: Mapped[str | None] = mapped_column(String(1))
+    confidence: Mapped[int | None] = mapped_column(Integer)
+    time_spent_ms: Mapped[int] = mapped_column(Integer, default=0)
+    flagged_guess: Mapped[int] = mapped_column(Integer, default=0)
+    marked: Mapped[int] = mapped_column(Integer, default=0)  # علامت‌گذاری برای بازبینی
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    attempt = relationship("ExamAttempt")
+    exam_item = relationship("ExamItem")
+
+
+class QuestionFamilyMember(Base):
+    """family_id (student spec §5.3): گروه سؤال‌های «هم‌ارز» — یک مهارت، سطح
+    مشابه، صورت متفاوت — برای بازآزمون هرگز عین سؤال قبلی داده نمی‌شود (§5.8).
+    عضویت گروه به‌صورت خودکار از روی (مبحث، مهارت، دشواری) ساخته می‌شود."""
+
+    __tablename__ = "question_family_members"
+
+    family_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("question_items.id"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    item = relationship("QuestionItem")
+
+
 class ExamAttempt(Base):
     __tablename__ = "exam_attempts"
 

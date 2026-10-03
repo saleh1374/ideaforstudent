@@ -1,10 +1,13 @@
 """Teacher panel APIs (سند پنل معلم). دسترسی معلم فقط به کلاس‌های تخصیص‌یافته
 خودش — دامنه محدود و شفاف (§18) + آزمون صلاحیت سالانه خودش (سند صلاحیت)
-+ سازندهٔ آزمون هوشمند و تحلیل پس از آزمون (§8 و §10 سند پنل معلم)."""
-from datetime import datetime
++ سازندهٔ آزمون هوشمند و تحلیل پس از آزمون (§8 و §10 سند پنل معلم)
++ بخش‌های تازه: کارت «چرا؟»/خط زمان (§5)، گروه‌بندی A–D (§7)، مأموریت کلاسی
+(§9)، نمایهٔ مدیریتی (§4)، مقایسه/شبیه‌ساز آمادگی (§11/§12)، شخصی‌سازی آزمون
+(§8.3) و گزارش والدین (§14)."""
+from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -12,11 +15,17 @@ from sqlalchemy.orm import selectinload
 from app.api.deps import AuthUser, get_current_user
 from app.core.db import get_db
 from app.models import exam_builder  # noqa: F401  (register new tables in Base.metadata)
+from app.models import panel_extensions  # noqa: F401  (register new tables in Base.metadata)
 from app.models import teacher_copilot  # noqa: F401  (register new tables in Base.metadata)
 from app.models.assessment import Exam, ExamAttempt, ExamItem, QuestionItem
 from app.models.catalog import Book, Topic
 from app.models.exam_builder import ExamBuilderProfile
-from app.models.org import ClassRoom, ClassTeacherAssignment, School, StudentProfile
+from app.models.org import ClassRoom, ClassTeacherAssignment, School, StudentProfile, User
+from app.models.panel_extensions import (
+    ClassMission,
+    ExamStudentPersonalization,
+    TeacherParentReport,
+)
 from app.models.teacher_assessment import TeacherExam, TeacherExamAttempt
 from app.models.teacher_copilot import TeacherSuggestion
 from app.services import exam_builder as eb_svc
@@ -91,10 +100,38 @@ async def my_classes(current: AuthUser = Depends(get_current_user), db: AsyncSes
     return {"classes": out}
 
 
+@router.get("/home")
+async def teacher_home(current: AuthUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """خانهٔ معلم (سند §2): KPIها + هشدارهای 🔴🟠🟡 + کارهای پیشنهادی امروز —
+    فقط از کلاس‌های خودِ معلم. هر بازدید با رویداد teacher_dashboard_viewed در
+    لاگ ممیزی ثبت می‌شود (سند RBAC/ممیزی)."""
+    data = await teacher_svc.home_dashboard(db, current.id)
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="teacher_dashboard_viewed",
+        entity_type="teacher",
+        entity_id=current.id,
+        detail="home",
+    )
+    await db.commit()
+    return data
+
+
 @router.get("/classes/{class_id}/radar")
 async def class_radar(class_id: int, current: AuthUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     await _owned_class(class_id, current, db)
-    return await teacher_svc.class_radar(db, class_id)
+    data = await teacher_svc.class_radar(db, class_id)
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="class_radar_viewed",
+        entity_type="class",
+        entity_id=class_id,
+        detail="radar",
+    )
+    await db.commit()
+    return data
 
 
 @router.get("/classes/{class_id}/root-cause/{topic_id}")
@@ -109,8 +146,19 @@ async def class_root_cause(
 
 
 @router.get("/classes/{class_id}/groups")
-async def class_groups(class_id: int, current: AuthUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def class_groups(
+    class_id: int,
+    scheme: str = Query("need"),
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """گروه‌بندی کلاس با دو شِمای سند: `need` (پنج‌گانهٔ نیاز §6 — پیش‌فرض) و
+    `abcd` (آموزش افتراقی §7، شکل ۸). شِمای نامعتبر → 400."""
     await _owned_class(class_id, current, db)
+    if scheme == "abcd":
+        return await teacher_svc.abcd_groups(db, class_id)
+    if scheme != "need":
+        raise HTTPException(400, "نوع گروه‌بندی نامعتبر است (need | abcd)")
     return await teacher_svc.need_groups(db, class_id)
 
 
@@ -1007,3 +1055,520 @@ async def my_schedule(
     from app.services import school_ops
 
     return await school_ops.teacher_schedule(db, current.id)
+
+
+# ==============================================================================
+# §5 کارت «چرا؟» و خط زمان دانش‌آموز — توضیح یک‌کلیکیِ از دادهٔ موجود
+# ==============================================================================
+
+
+@router.get("/classes/{class_id}/students/{student_id}/why")
+async def student_why_endpoint(
+    class_id: int,
+    student_id: int,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """§5.2 کارت «چرا؟»: شواهد عددی، آخرین شکست/موفقیت، علت غالب خطا و پیشنهاد
+    اقدام — فقط برای دانش‌آموزان کلاسِ خودِ معلم؛ خارج از کلاس → 404."""
+    await _owned_class(class_id, current, db)
+    try:
+        return await teacher_svc.student_why(db, class_id, student_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from None
+
+
+@router.get("/classes/{class_id}/students/{student_id}/timeline")
+async def student_timeline_endpoint(
+    class_id: int,
+    student_id: int,
+    limit: int = Query(40, ge=1, le=200),
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """§5.3 خط زمان: خطا، شاهد، آزمون، برنامه و تغییر وضعیت مباحث — به
+    ترتیب زمان، فقط همین دانش‌آموز (§18 دامنهٔ محدود معلم)."""
+    await _owned_class(class_id, current, db)
+    try:
+        return await teacher_svc.student_timeline(db, class_id, student_id, limit=limit)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from None
+
+
+# ==============================================================================
+# §9 مأموریت کلاسی — هدف معلم ← اجرای خودکار ← سنجش نتیجه
+# ==============================================================================
+
+
+class MissionIn(BaseModel):
+    title_fa: str = Field(min_length=3, max_length=200)
+    topic_id: int | None = None
+    target_mastery: float = 70.0
+    deadline: date | None = None
+
+
+class MissionCompleteIn(BaseModel):
+    note_fa: str | None = None
+
+
+@router.get("/classes/{class_id}/missions")
+async def class_missions(
+    class_id: int,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """فهرست مأموریت‌های کلاس با پیشرفت زنده (از تسط مؤثر همان کلاس)."""
+    await _owned_class(class_id, current, db)
+    return await teacher_svc.list_missions(db, class_id)
+
+
+@router.post("/classes/{class_id}/missions")
+async def create_class_mission(
+    class_id: int,
+    body: MissionIn,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """§9 مرحلهٔ ۱+۲: هدف معلم ثبت و دانش‌آموزان زیر آستانه به‌صورت خودکار
+    شناسایی می‌شوند. معلمِ همان کلاس؛ مبحث باید در کاتالوگ باشد."""
+    await _owned_class(class_id, current, db)
+    title = (body.title_fa or "").strip()
+    if not title:
+        raise HTTPException(400, "عنوان مأموریت الزامی است")
+    if not 10.0 <= body.target_mastery <= 100.0:
+        raise HTTPException(400, "هدف تسط باید بین ۱۰ تا ۱۰۰ درصد باشد")
+    if body.topic_id is not None:
+        topic = await db.get(Topic, body.topic_id)
+        if topic is None:
+            raise HTTPException(400, "مبحث هدف در کاتالوگ یافت نشد")
+
+    mission = await teacher_svc.create_mission(
+        db,
+        class_id,
+        title_fa=title,
+        topic_id=body.topic_id,
+        target_mastery=body.target_mastery,
+        deadline=body.deadline,
+        actor_user_id=current.id,
+    )
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="class_mission_created",
+        entity_type="class_mission",
+        entity_id=mission["id"],
+        detail=f"class={class_id} target={body.target_mastery} topic={body.topic_id}",
+    )
+    await db.commit()
+    return {"ok": True, "mission": mission}
+
+
+@router.post("/missions/{mission_id}/complete")
+async def complete_class_mission(
+    mission_id: int,
+    body: MissionCompleteIn,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """§9 مرحلهٔ ۳: سنجش نهایی و بستن مأموریت با نتیجهٔ اندازه‌گیری‌شده —
+    فقط معلمِ کلاسِ مربوطه؛ مأموریت ناموجود → 404."""
+    mission = await db.get(ClassMission, mission_id)
+    if mission is None:
+        raise HTTPException(404, "مأموریت یافت نشد")
+    await _owned_class(mission.class_id, current, db)
+    row = await teacher_svc.complete_mission(db, mission_id, note_fa=(body.note_fa or "").strip() or None)
+    if row is None:
+        raise HTTPException(404, "مأموریت یافت نشد")
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="class_mission_completed",
+        entity_type="class_mission",
+        entity_id=mission_id,
+        detail=f"class={mission.class_id}",
+    )
+    await db.commit()
+    return {"ok": True, "mission": row}
+
+
+# ==============================================================================
+# §4 نمایهٔ مدیریتی معلم (دید خودِ معلم) + §11 مقایسه + §12 شبیه‌ساز آمادگی
+# ==============================================================================
+
+
+@router.get("/my/profile")
+async def my_management_profile(
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """§4.1 نمایهٔ مدیریتی: آمار آموزشی، رفتار آموزشی، پاسخ‌گویی و وضعیت
+    صلاحیت — جدا نگه داشته‌شده، بدون امتیاز کل. بازدید ثبت می‌شود."""
+    data = await teacher_svc.management_profile(db, current.id)
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="teacher_profile_viewed",
+        entity_type="teacher",
+        entity_id=current.id,
+        detail="self",
+    )
+    await db.commit()
+    return data
+
+
+@router.get("/classes/{class_id}/compare")
+async def class_comparison(
+    class_id: int,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """§11 مقایسهٔ کلاس شما / میانگین مدرسه / میانگین استان — فقط تجمیع
+    ناشناس، برای تشخیص الگو نه رتبه‌بندی؛ بازدید در لاگ ممیزی ثبت می‌شود."""
+    await _owned_class(class_id, current, db)
+    try:
+        data = await teacher_svc.class_compare(db, class_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from None
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="class_comparison_viewed",
+        entity_type="class",
+        entity_id=class_id,
+        detail="compare",
+    )
+    await db.commit()
+    return data
+
+
+@router.get("/classes/{class_id}/readiness")
+async def class_readiness(
+    class_id: int,
+    topic_id: int | None = None,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """§12.1 «اگر فردا از این فصل امتحان بگیرم» — آمادگی لحظه‌ای کلاس روی
+    کل درس یا یک مبحث هدف."""
+    await _owned_class(class_id, current, db)
+    if topic_id is not None and await db.get(Topic, topic_id) is None:
+        raise HTTPException(400, "مبحث انتخاب‌شده در کاتالوگ یافت نشد")
+    return await teacher_svc.readiness_snapshot(db, class_id, topic_id=topic_id)
+
+
+class SimulatorIn(BaseModel):
+    topic_id: int | None = None
+    practice_quality: float | None = None      # درصد تکمیل تمرین پیشنهادی (۰ تا ۱۰۰)
+    retention_boost: float = 0.0               # افزایش ماندگاری از مرور فاصله‌دار (۰ تا ۰٫۴)
+    participation: float | None = None         # مشارکت پیشنهادی کلاس (۰ تا ۱۰۰)
+
+
+@router.post("/classes/{class_id}/simulator")
+async def class_readiness_simulator(
+    class_id: int,
+    body: SimulatorIn,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """§12.2 شبیه‌ساز: ورودی‌های معلم (کیفیت تمرین، مرور فاصله‌دار، مشارکت)
+    ← بازمحاسبهٔ تسط مؤثر ← آمادگی پروژکتشده + فهرست ریسک‌ها."""
+    await _owned_class(class_id, current, db)
+    if body.topic_id is not None and await db.get(Topic, body.topic_id) is None:
+        raise HTTPException(400, "مبحث انتخاب‌شده در کاتالوگ یافت نشد")
+    for key, value in (
+        ("practice_quality", body.practice_quality),
+        ("participation", body.participation),
+    ):
+        if value is not None and not 0.0 <= value <= 100.0:
+            raise HTTPException(400, f"مقدار {key} باید بین ۰ تا ۱۰۰ باشد")
+    if not 0.0 <= body.retention_boost <= 0.4:
+        raise HTTPException(400, "افزایش ماندگاری باید بین ۰ تا ۰٫۴ باشد")
+
+    return await teacher_svc.simulate_readiness(
+        db,
+        class_id,
+        topic_id=body.topic_id,
+        practice_quality=body.practice_quality,
+        retention_boost=body.retention_boost,
+        participation=body.participation,
+    )
+
+
+# ==============================================================================
+# §8.3 شخصی‌سازی آزمون برای هر دانش‌آموز (تمرکز A مفهوم / B محاسبات / C زمان)
+# ==============================================================================
+
+
+class FocusRowIn(BaseModel):
+    student_id: int
+    focus: str
+    note_fa: str | None = None
+
+
+class PersonalizationIn(BaseModel):
+    students: list[FocusRowIn]
+
+
+async def _class_student_names(db: AsyncSession, class_id: int) -> dict[int, str]:
+    ids = [
+        p.user_id
+        for p in (
+            await db.execute(select(StudentProfile).where(StudentProfile.class_id == class_id))
+        ).scalars()
+    ]
+    if not ids:
+        return {}
+    return {
+        u.id: u.full_name
+        for u in (await db.execute(select(User).where(User.id.in_(ids)))).scalars()
+    }
+
+
+@router.get("/exams/{exam_id}/personalization")
+async def exam_personalization(
+    exam_id: int,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """§8.3 برنامهٔ شخصی‌سازی آزمون: هر دانش‌آموزِ کلاس + تسط مؤثر + تمرکز
+    پیشنهادی از روی نوع خطای غالب + تمرکز ثبت‌شده توسط معلم."""
+    exam = await _accessible_exam(exam_id, current, db)
+    if exam.class_id is None:
+        raise HTTPException(400, "شخصی‌سازی فقط برای آزمون کلاسی امکان‌پذیر است")
+    names = await _class_student_names(db, exam.class_id)
+    metrics = await teacher_svc.student_metrics(db, sorted(names))
+    stored = {
+        row.student_user_id: row
+        for row in (
+            await db.execute(
+                select(ExamStudentPersonalization).where(
+                    ExamStudentPersonalization.exam_id == exam.id
+                )
+            )
+        ).scalars()
+    }
+    settings = eb_svc.focus_threshold()
+    students = []
+    for sid in sorted(names):
+        m = metrics.get(sid) or {}
+        suggested = eb_svc.derive_focus(m, threshold=settings)
+        saved = stored.get(sid)
+        focus = saved.focus if saved else suggested
+        students.append(
+            {
+                "student_id": sid,
+                "full_name": names[sid],
+                "mastery": m.get("mastery"),
+                "retention": m.get("retention"),
+                "open_errors": m.get("open_errors"),
+                "suggested_focus": suggested,
+                "focus": focus,
+                "focus_fa": eb_svc.FOCUS_FA.get(focus, focus),
+                "note_fa": saved.note_fa if saved else None,
+                "is_custom": saved is not None,
+            }
+        )
+    profile = await _profile_of(db, exam.id)
+    return {
+        "exam": {
+            "id": exam.id,
+            "title_fa": exam.title_fa,
+            "status": exam.status,
+            "mode": profile.mode if profile else "standard",
+            "mode_fa": eb_svc.MODES_FA.get(profile.mode if profile else "standard", ""),
+            "class_id": exam.class_id,
+        },
+        "focus_labels": dict(eb_svc.FOCUS_FA),
+        "students": students,
+        "note_fa": "تمرکز هر دانش‌آموز از نوع خطای غالب و تسط مؤثر او پیشنهاد می‌شود؛ تغییر دستی با انتخاب شما جایگزین می‌شود.",
+    }
+
+
+@router.put("/exams/{exam_id}/personalization")
+async def put_exam_personalization(
+    exam_id: int,
+    body: PersonalizationIn,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """§8.3 ثبت تمرکز هر دانش‌آموز (جایگزینی کامل برنامهٔ همین آزمون) — فقط
+    پیش‌نویس، فقط دانش‌آموزان کلاسِ همان آزمون، تمرکز معتبر A|B|C."""
+    exam = await _accessible_exam(exam_id, current, db)
+    _draft(exam)
+    if exam.class_id is None:
+        raise HTTPException(400, "شخصی‌سازی فقط برای آزمون کلاسی امکان‌پذیر است")
+    names = await _class_student_names(db, exam.class_id)
+    known: set[int] = set()
+
+    existing = list(
+        (
+            await db.execute(
+                select(ExamStudentPersonalization).where(
+                    ExamStudentPersonalization.exam_id == exam.id
+                )
+            )
+        ).scalars()
+    )
+    for row in existing:
+        await db.delete(row)
+    await db.flush()
+
+    for row in body.students:
+        if row.focus not in eb_svc.FOCUS_KEYS:
+            raise HTTPException(400, "تمرکز نامعتبر است؛ فقط A (مفهوم)، B (محاسبات) یا C (زمان) مجاز است")
+        if row.student_id not in names:
+            raise HTTPException(400, "این دانش‌آموز در کلاس این آزمون ثبت نشده است")
+        if row.student_id in known:
+            raise HTTPException(409, "برای هر دانش‌آموز فقط یک تمرکز ثبت می‌شود")
+        known.add(row.student_id)
+        db.add(
+            ExamStudentPersonalization(
+                exam_id=exam.id,
+                student_user_id=row.student_id,
+                focus=row.focus,
+                note_fa=(row.note_fa or "").strip() or None,
+            )
+        )
+    await db.flush()
+
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="exam_personalization_saved",
+        entity_type="exam",
+        entity_id=exam.id,
+        detail=f"class={exam.class_id} students={len(known)}",
+    )
+    await db.commit()
+    return {"ok": True, "saved": len(known), **await exam_personalization(exam.id, current, db)}
+
+
+# ==============================================================================
+# §14 گزارش والدین توسط معلم — پیش‌نویس از دادهٔ موجود، ویرایش، ارسال
+# ==============================================================================
+
+
+class ParentReportPatchIn(BaseModel):
+    title_fa: str | None = None
+    body_fa: str | None = None
+    send: bool = False
+
+
+def _report_row(r: TeacherParentReport) -> dict:
+    return {
+        "id": r.id,
+        "class_id": r.class_id,
+        "student_user_id": r.student_user_id,
+        "teacher_user_id": r.teacher_user_id,
+        "title_fa": r.title_fa,
+        "body_fa": r.body_fa,
+        "status": r.status,
+        "status_fa": {"draft": "پیش‌نویس", "edited": "ویرایش‌شده", "sent": "ارسال‌شده"}.get(
+            r.status, r.status
+        ),
+        "generated_at": r.generated_at.isoformat() if r.generated_at else None,
+        "edited_at": r.edited_at.isoformat() if r.edited_at else None,
+        "sent_at": r.sent_at.isoformat() if r.sent_at else None,
+    }
+
+
+@router.post("/classes/{class_id}/students/{student_id}/parent-report")
+async def create_parent_report(
+    class_id: int,
+    student_id: int,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """§14 ساخت پیش‌نویس گزارش والدین از دادهٔ موجود: نقاط قوت، مباحث نیازمند
+    تمرین، خطاهای پرتکرار، روند و اقدام پیشنهادی — بدون اطلاعات سایر
+    دانش‌آموزان. پیش‌نویس ذخیره می‌شود تا معلم پیش از ارسال ویرایش کند."""
+    await _owned_class(class_id, current, db)
+    try:
+        draft = await teacher_svc.build_parent_report(db, class_id, student_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from None
+    report = TeacherParentReport(
+        class_id=class_id,
+        student_user_id=student_id,
+        teacher_user_id=current.id,
+        title_fa=draft["title_fa"],
+        body_fa=draft["body_fa"],
+        status="draft",
+    )
+    db.add(report)
+    await db.flush()
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="parent_report_generated",
+        entity_type="teacher_parent_report",
+        entity_id=report.id,
+        detail=f"class={class_id} student={student_id}",
+    )
+    await db.commit()
+    return {"ok": True, "report": _report_row(report), "sections": draft["sections"]}
+
+
+@router.get("/parent-reports")
+async def my_parent_reports(
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """گزارش‌های والدینِ ساخته‌شده توسط خودِ معلم (مالکیت §RBAC) — نام دانش‌آموز
+    همراه هر گزارش."""
+    q = select(TeacherParentReport).order_by(TeacherParentReport.id.desc())
+    if current.system_role != "platform_admin":
+        q = q.where(TeacherParentReport.teacher_user_id == current.id)
+    rows = list((await db.execute(q)).scalars())
+    names = {}
+    ids = sorted({r.student_user_id for r in rows})
+    if ids:
+        names = {
+            u.id: u.full_name
+            for u in (await db.execute(select(User).where(User.id.in_(ids)))).scalars()
+        }
+    return {
+        "reports": [
+            {**_report_row(r), "student_name": names.get(r.student_user_id)}
+            for r in rows
+        ]
+    }
+
+
+@router.patch("/parent-reports/{report_id}")
+async def patch_parent_report(
+    report_id: int,
+    body: ParentReportPatchIn,
+    current: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """§14/§16 ویرایش و ارسال گزارش: فقط خودِ معلمِ سازنده (یا platform_admin) —
+    معلم دیگر 403؛ ویرایش وضعیت را «ویرایش‌شده» و ارسال را «ارسال‌شده» می‌کند."""
+    report = await db.get(TeacherParentReport, report_id)
+    if report is None:
+        raise HTTPException(404, "گزارش یافت نشد")
+    if report.teacher_user_id != current.id and current.system_role != "platform_admin":
+        raise HTTPException(403, "این گزارش را شما ساخته‌اید؛ فقط سازنده می‌تواند ویرایش کند")
+
+    changed = False
+    if body.title_fa is not None:
+        title = body.title_fa.strip()
+        if not title:
+            raise HTTPException(400, "عنوان گزارش نمی‌تواند خالی باشد")
+        report.title_fa = title
+        changed = True
+    if body.body_fa is not None:
+        text = body.body_fa.strip()
+        if not text:
+            raise HTTPException(400, "متن گزارش نمی‌تواند خالی باشد")
+        report.body_fa = text
+        changed = True
+
+    if changed:
+        report.status = "edited"
+        report.edited_at = datetime.utcnow()
+    if body.send:
+        report.status = "sent"
+        report.sent_at = datetime.utcnow()
+    await db.commit()
+    return {"ok": True, "report": _report_row(report)}

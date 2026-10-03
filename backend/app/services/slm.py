@@ -106,6 +106,48 @@ def status_rank(status: str) -> int:
     return {"critical": 0, "weak": 1, "consolidating": 2, "mastered": 3, "unknown": 4}.get(status, 4)
 
 
+# ---------------------------------------------- پیشرفت در برنامه (§4.4)
+# P = 100 × Σ( u_k × completed_k ) / Σ( u_k × due_k )   # فقط کارهای سررسیدشده
+PLAN_UNIT_WEIGHTS: dict[str, float] = {
+    "lesson": 0.25,        # درس
+    "practice": 0.30,      # تمرین
+    "quiz": 0.10,          # کوییز هفتگی
+    "period_exam": 0.25,   # آزمون دوره‌ای / تجمعی
+    "remedial": 0.10,      # بستهٔ ترمیمی و بازآزمون
+}
+
+# نگاشت task_type برنامه ← واحد فرمول (بخش‌های بدون وزنِ سند، مانند مرور
+# فاصله‌دار و آمادگی آزمون تجمعی، در مخرج/صورت وارد نمی‌شوند)
+PLAN_TASK_UNIT: dict[str, str] = {
+    "lesson": "lesson",
+    "practice": "practice",
+    "quiz": "quiz",
+    "remedial_pack": "remedial",
+    "retest": "remedial",
+}
+
+
+def progress_in_plan(entries: list[tuple[str, bool, bool]]) -> float:
+    """فرمول «پیشرفت در برنامه» P (§4.4) — محض و بدون دسترسی به دیتابیس.
+
+    entries: [(واحد یا نوع کار، انجام‌شده؟، سررسیدشده تا امروز؟), ...]
+    completed_k فقط وقتی ۱ است که شرط انجام برقرار باشد (مثلاً گذراندن
+    آزمونک برای درس). اگر هیچ کاری سررسید نشده باشد صفر برمی‌گردد.
+    """
+    num = 0.0
+    den = 0.0
+    for unit, completed, due in entries:
+        u = PLAN_UNIT_WEIGHTS.get(unit)
+        if u is None or not due:
+            continue
+        den += u
+        if completed:
+            num += u
+    if den == 0:
+        return 0.0
+    return round(100.0 * num / den, 1)
+
+
 # ---------------------------------------------------------------- teacher
 # دسته‌بندی پنج‌گانه نیاز (سند پنل معلم §6) — first-match wins، به ترتیب جدول سند
 

@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import re
+import secrets
+from datetime import date, datetime
 
 from fastapi import HTTPException
 from sqlalchemy import delete, select
@@ -21,12 +23,15 @@ from app.models.org import (
     ClassRoom,
     ClassTeacherAssignment,
     Employee,
+    ParentLink,
     School,
     SchoolAssignment,
     StudentProfile,
     User,
 )
+from app.models.panel_extensions import SchoolIntervention, TeacherInvitation
 from app.models.school_ops import ClassScheduleEntry, SchoolShift
+from app.models.slm import StudentTopicState
 from app.services.rbac_service import log_action
 
 DAY_NAMES = ["شنبه", "یکشنبه", "دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه"]
@@ -815,3 +820,546 @@ async def teacher_schedule(db: AsyncSession, user_id: int) -> dict:
             }
         )
     return {"schools": out}
+
+
+# ==============================================================================
+# §17 سند مدیر مدرسه + §25/§26 سند ناحیه — مداخلهٔ سطح مدرسه و تحلیل اثر
+# چرخه: Before → Intervention → Retest → After → Retention check
+# ==============================================================================
+
+INTERVENTION_STATUS_FA = {
+    "planned": "برنامه‌ریزی‌شده",
+    "in_progress": "در حال اجرا",
+    "done": "انجام‌شده",
+    "evaluated": "ارزیابی‌شده",
+}
+
+# گذار مجاز وضعیت‌ها (هرگز از «ارزیابی‌شده» به عقب برنمی‌گردیم)
+INTERVENTION_TRANSITIONS: dict[str, set[str]] = {
+    "planned": {"in_progress", "done"},
+    "in_progress": {"done"},
+    "done": {"evaluated"},
+    "evaluated": set(),
+}
+
+
+async def _class_mastery(db: AsyncSession, class_id: int, topic_id: int | None) -> float | None:
+    """تسط مؤثر فعلی کلاس (روی یک مبحث یا کل مباحث) — مبنای «بازآزمون»."""
+    ids = [
+        p.user_id
+        for p in (await db.execute(select(StudentProfile).where(StudentProfile.class_id == class_id))).scalars()
+    ]
+    if not ids:
+        return None
+    q = select(StudentTopicState).where(StudentTopicState.student_user_id.in_(ids))
+    if topic_id is not None:
+        q = q.where(StudentTopicState.topic_id == topic_id)
+    states = [s for s in (await db.execute(q)).scalars() if s.evidence_count >= 3]
+    if not states:
+        return None
+    return round(sum(s.effective_mastery for s in states) / len(states), 1)
+
+
+async def _get_intervention(db: AsyncSession, school_id: int, intervention_id: int) -> SchoolIntervention:
+    iv = await db.get(SchoolIntervention, intervention_id)
+    if iv is None or iv.school_id != school_id:
+        raise HTTPException(404, "مداخله یافت نشد")
+    return iv
+
+
+def intervention_row(iv: SchoolIntervention) -> dict:
+    return {
+        "id": iv.id,
+        "school_id": iv.school_id,
+        "class_id": iv.class_id,
+        "topic_id": iv.topic_id,
+        "title_fa": iv.title_fa,
+        "description_fa": iv.description_fa,
+        "owner_user_id": iv.owner_user_id,
+        "status": iv.status,
+        "status_fa": INTERVENTION_STATUS_FA.get(iv.status, iv.status),
+        "due_at": iv.due_at.isoformat() if iv.due_at else None,
+        "created_at": iv.created_at.isoformat() if iv.created_at else None,
+        "started_at": iv.started_at.isoformat() if iv.started_at else None,
+        "closed_at": iv.closed_at.isoformat() if iv.closed_at else None,
+        "mastery_before": iv.mastery_before,
+        "mastery_after": iv.mastery_after,
+        "retention_check": iv.retention_check,
+        "outcome_fa": iv.outcome_fa,
+        "next_states": sorted(INTERVENTION_TRANSITIONS.get(iv.status, set())),
+    }
+
+
+async def list_interventions(db: AsyncSession, school_id: int, status: str | None = None) -> dict:
+    q = select(SchoolIntervention).where(SchoolIntervention.school_id == school_id)
+    if status is not None:
+        q = q.where(SchoolIntervention.status == status)
+    rows = list((await db.execute(q.order_by(SchoolIntervention.id.desc()))).scalars())
+    names = {}
+    owner_ids = sorted({r.owner_user_id for r in rows if r.owner_user_id})
+    if owner_ids:
+        names = {
+            u.id: u.full_name
+            for u in (await db.execute(select(User).where(User.id.in_(owner_ids)))).scalars()
+        }
+    out = []
+    for iv in rows:
+        row = intervention_row(iv)
+        row["owner_name"] = names.get(iv.owner_user_id)
+        out.append(row)
+    return {
+        "school_id": school_id,
+        "interventions": out,
+        "note_fa": "هر مداخله چرخه «قبل ← اجرا ← بازآزمون ← بعد ← سنجش ماندگاری» را طی می‌کند؛ اثرش اندازه‌گیری می‌شود.",
+    }
+
+
+async def create_intervention(
+    db: AsyncSession,
+    school_id: int,
+    *,
+    title_fa: str,
+    description_fa: str | None = None,
+    class_id: int | None = None,
+    topic_id: int | None = None,
+    owner_user_id: int | None = None,
+    due_at: date | None = None,
+    actor_user_id: int | None = None,
+) -> dict:
+    """ثبت مداخلهٔ سطح مدرسه با مالک و مهلت — سنجش «قبل» به‌صورت خودکار از
+    دادهٔ فعلی همان کلاس/مبدأ گرفته می‌شود (دیتای ساختگی ثبت نمی‌شود)."""
+    if class_id is not None:
+        cls = await db.get(ClassRoom, class_id)
+        if cls is None or cls.school_id != school_id:
+            raise HTTPException(400, "کلاس انتخاب‌شده متعلق به این مدرسه نیست")
+    if owner_user_id is not None and not await _teacher_is_school_staff(db, school_id, owner_user_id):
+        raise HTTPException(400, "مالک مداخله باید از کادر همین مدرسه باشد")
+
+    mastery_before = await _class_mastery(db, class_id, topic_id) if class_id is not None else None
+
+    iv = SchoolIntervention(
+        school_id=school_id,
+        class_id=class_id,
+        topic_id=topic_id,
+        title_fa=title_fa.strip(),
+        description_fa=(description_fa or "").strip() or None,
+        owner_user_id=owner_user_id,
+        status="planned",
+        created_by=actor_user_id,
+        due_at=due_at,
+        mastery_before=mastery_before,
+    )
+    db.add(iv)
+    await db.flush()
+    await log_action(
+        db,
+        actor_user_id=actor_user_id,
+        action="school_intervention_created",
+        entity_type="school_intervention",
+        entity_id=iv.id,
+        detail=f"school={school_id} class={class_id} before={mastery_before}",
+    )
+    await db.flush()
+    return intervention_row(iv)
+
+
+async def update_intervention(
+    db: AsyncSession,
+    school_id: int,
+    intervention_id: int,
+    *,
+    status: str | None = None,
+    mastery_after: float | None = None,
+    retention_check: float | None = None,
+    outcome_fa: str | None = None,
+    note_fa: str | None = None,
+    actor_user_id: int | None = None,
+) -> dict:
+    """به‌روزرسانی مداخله: گذار وضعیت مجاز + ثبت سنجش «بعد» و «ماندگاری»
+    (هر دو درصد ۰ تا ۱۰۰). اندازه‌گیری‌ها جدا از وضعیت قابل ثبت‌اند."""
+    iv = await _get_intervention(db, school_id, intervention_id)
+
+    if status is not None:
+        if status not in INTERVENTION_STATUS_FA:
+            raise HTTPException(400, "وضعیت مداخله نامعتبر است")
+        if status not in INTERVENTION_TRANSITIONS.get(iv.status, set()):
+            raise HTTPException(
+                409,
+                f"گذار از «{INTERVENTION_STATUS_FA.get(iv.status, iv.status)}» به "
+                f"«{INTERVENTION_STATUS_FA.get(status, status)}» مجاز نیست",
+            )
+        iv.status = status
+        if status == "in_progress" and iv.started_at is None:
+            iv.started_at = datetime.utcnow()
+        if status in ("done", "evaluated") and iv.closed_at is None:
+            iv.closed_at = datetime.utcnow()
+
+    for key, value in (("mastery_after", mastery_after), ("retention_check", retention_check)):
+        if value is not None:
+            if not 0.0 <= float(value) <= 100.0:
+                raise HTTPException(400, "مقدار سنجش باید بین ۰ تا ۱۰۰ باشد")
+            setattr(iv, key, float(value))
+    if outcome_fa is not None:
+        iv.outcome_fa = outcome_fa.strip() or None
+    if note_fa and not iv.outcome_fa:
+        iv.outcome_fa = note_fa.strip()
+
+    if iv.mastery_after is not None and iv.status == "planned":
+        iv.status = "done"
+        iv.closed_at = iv.closed_at or datetime.utcnow()
+
+    await log_action(
+        db,
+        actor_user_id=actor_user_id,
+        action="school_intervention_updated",
+        entity_type="school_intervention",
+        entity_id=iv.id,
+        detail=f"school={school_id} status={iv.status} after={iv.mastery_after} retention={iv.retention_check}",
+    )
+    await db.flush()
+    return intervention_row(iv)
+
+
+def _effect_verdict(delta: float | None, retention: float | None) -> tuple[str, str]:
+    if delta is None:
+        return "unknown", "هنوز هر دو سنجش «قبل» و «بعد» ثبت نشده است؛ اثر قابل قضاوت نیست."
+    if delta >= 10.0 and (retention is None or retention >= 60.0):
+        return "effective", f"این مداخله واقعاً اثر داشته است — بهبود {round(delta)} واحد"
+    if delta > 0:
+        return "partial", f"بهبود {round(delta, 1)} واحد ثبت شده؛ کمتر از آستانهٔ اثر معنادار (۱۰ واحد) است"
+    return "ineffective", "اثر معناداری دیده نشد — روش یا محتوای مداخله بازبینی شود"
+
+
+async def intervention_effect(db: AsyncSession, school_id: int, intervention_id: int) -> dict | None:
+    """§17 تحلیل اثر مداخله: چرخهٔ کامل با مقادیر ثبت‌شده + بازآزمونِ زندهٔ
+    همان کلاس/مبحث + حکم قابل توضیح (نه امتیاز مصنوعی)."""
+    iv = await _get_intervention(db, school_id, intervention_id)
+    retest = await _class_mastery(db, iv.class_id, iv.topic_id) if iv.class_id is not None else None
+    delta = (
+        round(iv.mastery_after - iv.mastery_before, 1)
+        if iv.mastery_before is not None and iv.mastery_after is not None
+        else None
+    )
+    verdict, verdict_fa = _effect_verdict(delta, iv.retention_check)
+
+    steps = [
+        {"key": "before", "label_fa": "قبل از مداخله", "value": iv.mastery_before, "recorded": iv.mastery_before is not None},
+        {"key": "intervention", "label_fa": "مداخله", "value": None, "recorded": True, "detail_fa": iv.title_fa},
+        {"key": "retest", "label_fa": "بازآزمون (سنجش مجدد فعلی)", "value": retest, "recorded": retest is not None},
+        {"key": "after", "label_fa": "بعد از مداخله", "value": iv.mastery_after, "recorded": iv.mastery_after is not None},
+        {"key": "retention", "label_fa": "ماندگاری در سنجش بعدی", "value": iv.retention_check, "recorded": iv.retention_check is not None},
+    ]
+    return {
+        "intervention": intervention_row(iv),
+        "cycle": steps,
+        "delta_pct": delta,
+        "verdict": verdict,
+        "verdict_fa": verdict_fa,
+        "note_fa": "سنجش‌ها درصد تسط مؤثرند؛ «بازآزمون» از دادهٔ فعلی همان کلاس خوانده می‌شود و اگر شواهد کافی نباشد «—» است.",
+    }
+
+
+# ==============================================================================
+# §9 دعوت معلم ← فعال‌شدن حساب + §10 تاریخچهٔ تخصیص‌ها + §11 اتصال والدین
+# ==============================================================================
+
+
+def _invite_code() -> str:
+    return "DN-" + secrets.token_hex(3).upper()
+
+
+def invitation_row(inv: TeacherInvitation) -> dict:
+    return {
+        "id": inv.id,
+        "school_id": inv.school_id,
+        "full_name": inv.full_name,
+        "phone": inv.phone,
+        "subject": inv.subject,
+        "note": inv.note,
+        "invite_code": inv.invite_code,
+        "status": inv.status,
+        "status_fa": {"pending": "در انتظار پذیرش", "accepted": "پذیرفته‌شده", "cancelled": "لغوشده"}.get(
+            inv.status, inv.status
+        ),
+        "created_at": inv.created_at.isoformat() if inv.created_at else None,
+        "decided_at": inv.decided_at.isoformat() if inv.decided_at else None,
+    }
+
+
+async def list_invitations(db: AsyncSession, school_id: int, status: str | None = None) -> dict:
+    q = select(TeacherInvitation).where(TeacherInvitation.school_id == school_id)
+    if status is not None:
+        q = q.where(TeacherInvitation.status == status)
+    rows = list((await db.execute(q.order_by(TeacherInvitation.id.desc()))).scalars())
+    return {
+        "school_id": school_id,
+        "invitations": [invitation_row(r) for r in rows],
+        "note_fa": "گام سوم افزودن معلم: ارسال دعوت ← فعال‌شدن حساب (سند مدیر مدرسه §9).",
+    }
+
+
+async def create_invitation(
+    db: AsyncSession,
+    school_id: int,
+    *,
+    full_name: str,
+    phone: str | None = None,
+    subject: str | None = None,
+    note: str | None = None,
+    actor_user_id: int | None = None,
+) -> dict:
+    """§9.3 ارسال دعوت برای معلم جدید — کد یکتا به‌صورت خودکار ساخته می‌شود."""
+    if not full_name.strip():
+        raise HTTPException(400, "نام معلم الزامی است")
+    inv = None
+    for _ in range(8):
+        code = _invite_code()
+        taken = (
+            await db.execute(select(TeacherInvitation.id).where(TeacherInvitation.invite_code == code))
+        ).scalar_one_or_none()
+        if taken is not None:
+            continue
+        inv = TeacherInvitation(
+            school_id=school_id,
+            full_name=full_name.strip(),
+            phone=(phone or "").strip() or None,
+            subject=(subject or "").strip() or None,
+            note=(note or "").strip() or None,
+            invite_code=code,
+            status="pending",
+            created_by=actor_user_id,
+        )
+        db.add(inv)
+        await db.flush()
+        break
+    if inv is None:
+        raise HTTPException(500, "ساخت کد دعوت ناموفق بود؛ دوباره تلاش کنید")
+
+    await log_action(
+        db,
+        actor_user_id=actor_user_id,
+        action="teacher_invitation_created",
+        entity_type="teacher_invitation",
+        entity_id=inv.id,
+        detail=f"school={school_id} code={inv.invite_code}",
+    )
+    await db.flush()
+    return invitation_row(inv)
+
+
+async def cancel_invitation(
+    db: AsyncSession, school_id: int, invitation_id: int, actor_user_id: int | None = None
+) -> dict:
+    inv = (
+        await db.execute(
+            select(TeacherInvitation).where(
+                TeacherInvitation.id == invitation_id,
+                TeacherInvitation.school_id == school_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if inv is None:
+        raise HTTPException(404, "دعوت‌نامه یافت نشد")
+    if inv.status == "accepted":
+        raise HTTPException(409, "این دعوت پذیرفته و حساب فعال شده است؛ قابل لغو نیست")
+    if inv.status == "cancelled":
+        return invitation_row(inv)
+    inv.status = "cancelled"
+    inv.decided_at = datetime.utcnow()
+    await log_action(
+        db,
+        actor_user_id=actor_user_id,
+        action="teacher_invitation_cancelled",
+        entity_type="teacher_invitation",
+        entity_id=inv.id,
+        detail=f"school={school_id}",
+    )
+    await db.flush()
+    return invitation_row(inv)
+
+
+async def membership_history(db: AsyncSession, school_id: int) -> dict:
+    """§10 تاریخچهٔ تخصیص‌ها — تاریخ‌دار، هرگز حذف نمی‌شود؛ ردیف‌های بسته‌شده
+    با تاریخ پایان باقی می‌مانند (گذشته پاک نمی‌شود)."""
+    classes = {
+        c.id: c
+        for c in (await db.execute(select(ClassRoom).where(ClassRoom.school_id == school_id))).scalars()
+    }
+    links = (
+        (
+            await db.execute(
+                select(ClassTeacherAssignment)
+                .where(ClassTeacherAssignment.class_id.in_(list(classes)))
+                .order_by(ClassTeacherAssignment.id)
+            )
+        ).scalars()
+        if classes
+        else []
+    )
+    teacher_ids = sorted({l.teacher_user_id for l in links})
+    teachers = {
+        u.id: u.full_name
+        for u in (await db.execute(select(User).where(User.id.in_(teacher_ids)))).scalars()
+    } if teacher_ids else {}
+
+    teacher_rows = [
+        {
+            "assignment_id": l.id,
+            "class_id": l.class_id,
+            "class_name": classes[l.class_id].name if l.class_id in classes else None,
+            "teacher_id": l.teacher_user_id,
+            "teacher_name": teachers.get(l.teacher_user_id, f"#{l.teacher_user_id}"),
+            "subject": l.subject,
+            "start_date": l.start_date.isoformat() if l.start_date else None,
+            "end_date": l.end_date.isoformat() if l.end_date else None,
+            "status": l.status,
+            "is_active": l.status == "active" and l.end_date is None,
+        }
+        for l in links
+    ]
+
+    profiles = list(
+        (await db.execute(select(StudentProfile).where(StudentProfile.school_id == school_id))).scalars()
+    )
+    student_ids = [p.user_id for p in profiles]
+    students_map = {
+        u.id: u.full_name
+        for u in (await db.execute(select(User).where(User.id.in_(student_ids)))).scalars()
+    } if student_ids else {}
+    student_rows = [
+        {
+            "student_id": p.user_id,
+            "student_name": students_map.get(p.user_id, f"#{p.user_id}"),
+            "class_id": p.class_id,
+            "class_name": classes[p.class_id].name if p.class_id in classes else None,
+            "entry_year": p.entry_year,
+            "status": p.status,
+            "status_fa": {"active": "فعال", "left": "خارج‌شده", "transferred": "انتقال‌یافته"}.get(p.status, p.status),
+        }
+        for p in profiles
+    ]
+
+    return {
+        "school_id": school_id,
+        "teacher_assignments": teacher_rows,
+        "student_memberships": student_rows,
+        "note_fa": "تاریخچه فقط افزوده می‌شود؛ عضویت‌های قبلی با تاریخ پایان بسته می‌شوند، نه پاک.",
+    }
+
+
+async def list_parents(db: AsyncSession, school_id: int) -> dict:
+    """§11 اتصال والدین: هر دانش‌آموز مدرسه + والدین متصل (و بدون والدین)."""
+    profiles = list(
+        (await db.execute(select(StudentProfile).where(StudentProfile.school_id == school_id))).scalars()
+    )
+    student_ids = [p.user_id for p in profiles]
+    names = {
+        u.id: u.full_name
+        for u in (await db.execute(select(User).where(User.id.in_(student_ids)))).scalars()
+    } if student_ids else {}
+    links = (
+        (await db.execute(select(ParentLink).where(ParentLink.student_user_id.in_(student_ids)))).scalars()
+        if student_ids
+        else []
+    )
+    parent_ids = sorted({l.parent_user_id for l in links})
+    parent_names = {
+        u.id: u.full_name
+        for u in (await db.execute(select(User).where(User.id.in_(parent_ids)))).scalars()
+    } if parent_ids else {}
+    by_student: dict[int, list[dict]] = {}
+    for l in links:
+        by_student.setdefault(l.student_user_id, []).append(
+            {
+                "link_id": l.id,
+                "parent_id": l.parent_user_id,
+                "parent_name": parent_names.get(l.parent_user_id, f"#{l.parent_user_id}"),
+                "relation": l.relation,
+                "status": l.status,
+            }
+        )
+
+    rows = [
+        {
+            "student_id": p.user_id,
+            "student_name": names.get(p.user_id, f"#{p.user_id}"),
+            "class_id": p.class_id,
+            "parents": by_student.get(p.user_id, []),
+        }
+        for p in profiles
+    ]
+    return {
+        "school_id": school_id,
+        "students": rows,
+        "without_parent": sum(1 for r in rows if not r["parents"]),
+        "note_fa": "اتصال والدین با تأیید مدیر ثبت می‌شود؛ تاریخچهٔ پیوندها هرگز حذف نمی‌شود.",
+    }
+
+
+async def link_parent(
+    db: AsyncSession,
+    school_id: int,
+    *,
+    parent_user_id: int,
+    student_user_id: int,
+    relation: str | None = None,
+    actor_user_id: int | None = None,
+) -> dict:
+    """§11 متصل/تأیید کردن والدین برای دانش‌آموز همین مدرسه."""
+    profile = (
+        await db.execute(
+            select(StudentProfile).where(
+                StudentProfile.user_id == student_user_id,
+                StudentProfile.school_id == school_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if profile is None:
+        raise HTTPException(400, "این دانش‌آموز در این مدرسه ثبت نشده است")
+    parent = await db.get(User, parent_user_id)
+    if parent is None:
+        raise HTTPException(404, "کاربر والد یافت نشد")
+    if parent.system_role == "student":
+        raise HTTPException(400, "کاربر انتخاب‌شده دانش‌آموز است و نمی‌تواند والد باشد")
+    if parent_user_id == student_user_id:
+        raise HTTPException(400, "والد و دانش‌آموز نمی‌توانند یکسان باشند")
+
+    existing = (
+        await db.execute(
+            select(ParentLink).where(
+                ParentLink.parent_user_id == parent_user_id,
+                ParentLink.student_user_id == student_user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(409, "پیوند والدین قبلاً ثبت شده است")
+
+    link = ParentLink(
+        parent_user_id=parent_user_id,
+        student_user_id=student_user_id,
+        relation=(relation or "").strip() or None,
+        status="active",
+    )
+    db.add(link)
+    await db.flush()
+    await log_action(
+        db,
+        actor_user_id=actor_user_id,
+        action="parent_link_created",
+        entity_type="parent_link",
+        entity_id=link.id,
+        detail=f"school={school_id} student={student_user_id} parent={parent_user_id}",
+    )
+    await db.flush()
+    return {
+        "ok": True,
+        "link": {
+            "link_id": link.id,
+            "parent_id": link.parent_user_id,
+            "parent_name": parent.full_name,
+            "student_id": link.student_user_id,
+            "relation": link.relation,
+            "status": link.status,
+        },
+    }

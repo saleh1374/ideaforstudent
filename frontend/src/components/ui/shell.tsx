@@ -79,11 +79,12 @@ const NAV: NavGroup[] = [
     items: [
       {
         href: "/teacher",
-        label: "هوش کلاس",
-        icon: IconUsers,
+        label: "خانه معلم",
+        icon: IconHome,
         roles: ["teacher"],
-        defaultTab: "class",
+        defaultTab: "home",
         children: [
+          { href: "/teacher?tab=class", label: "هوش کلاس", icon: IconUsers },
           { href: "/teacher?tab=assessment", label: "ارزیابی صلاحیت", icon: IconCheckCircle },
           { href: "/teacher?tab=builder", label: "سازنده آزمون", icon: IconExam },
           { href: "/teacher?tab=analysis", label: "تحلیل آزمون", icon: IconChart },

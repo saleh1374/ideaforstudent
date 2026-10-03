@@ -14,7 +14,17 @@ from app.core.db import get_db
 from app.core.passwords import hash_password
 from app.models.employment import EmploymentRequest
 from app.models.district_exams import DistrictExam  # noqa: F401  (register tables)
-from app.models.org import District, Employee, Employment, School, SchoolAssignment, User
+from app.models.district_reports import DistrictReport, StudentTransfer  # noqa: F401
+from app.models.org import (
+    ClassRoom,
+    District,
+    Employee,
+    Employment,
+    School,
+    SchoolAssignment,
+    StudentProfile,
+    User,
+)
 from app.models.rbac import Permission, Role, RolePermission
 from app.models.teacher_assessment import TeacherIntervention
 from app.services import district as district_svc
@@ -854,3 +864,390 @@ async def district_mission_detail(
     """داشبورد پیشرفت یک مأموریت: تسط هر مدرسه نسبت به هدف (با سرکوب)."""
     mission = await de_svc.mission_or_404(db, mission_id, district_id)
     return {"mission": await de_svc.mission_progress(db, mission)}
+
+
+# ------------------------- §5–§6 مقایسه و رشد مدارس -------------------------
+
+
+@router.get("/schools/compare")
+async def compare_schools(
+    grade: str | None = None,
+    subject: str | None = None,
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """مقایسه مدارس در سه گام «سطح ورودی ← وضعیت فعلی ← میزان رشد» (§5) با
+    فیلتر اختیاری پایه/درس و سرکوب حداقل جمعیت زیر ۱۰ نفر."""
+    return await district_svc.school_comparison(db, district_id, grade=grade, subject=subject)
+
+
+@router.get("/schools/growth")
+async def growth_schools(
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """وضعیت فعلی در برابر رشد هر مدرسه + سری رشد در طول زمان (§6/§2)."""
+    return await district_svc.school_growth(db, district_id)
+
+
+# ------------------------- §2/§3 روندها و شش محور سلامت -------------------------
+
+
+@router.get("/trends")
+async def district_trends(
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """روندهای داشبورد ناحیه (§2): رشد، تسط، ماندگاری، مشارکت، تکمیل، مداخله."""
+    return await district_svc.trends(db, district_id)
+
+
+@router.get("/health")
+async def district_health(
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """شش محور سلامت آموزشی مستقل (§3) — بدون ساخت عدد ساختگی واحد."""
+    return await district_svc.health_axes(db, district_id)
+
+
+# ------------------------- §9/§11/§29/§30 مرکز توجه -------------------------
+
+
+@router.get("/attention-center")
+async def district_attention_center(
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """مرکز توجه ناحیه: مدارس/کلاس‌های نیازمند اقدام، مشکلات مشترک و هشدارها."""
+    return await district_svc.attention_center(db, district_id)
+
+
+# ------------------------- §7/§8/§23 تحلیل خطای ناحیه -------------------------
+
+
+@router.get("/error-analysis")
+async def district_error_analysis(
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """طبقه‌بندی خطاهای ناحیه به تفکیک علت/مدرسه/مبحث (§23) با حداقل جمعیت."""
+    return await district_svc.error_analysis(db, district_id)
+
+
+# ------------------------- §18–§19 انتقال دانش‌آموز -------------------------
+
+
+class TransferIn(BaseModel):
+    student_user_id: int
+    to_school_id: int
+    reason_fa: str
+    effective_date: date | None = None
+
+
+@router.post("/transfers")
+async def transfer_student(
+    body: TransferIn,
+    district_id: int = Depends(district_scope("manage_schools")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """انتقال دانش‌آموز بین مدارس ناحیه (§19): اعتبارسنجی هر دو مدرسه،
+    حفظ سابقه مدرسه/کلاس قبلی، جابه‌جایی پروفایل و ثبت ممیزی
+    student_transferred — هیچ داده‌ای حذف نمی‌شود."""
+    reason = body.reason_fa.strip()
+    if not reason:
+        raise HTTPException(400, "دلیل انتقال الزامی است")
+
+    profile = (
+        await db.execute(select(StudentProfile).where(StudentProfile.user_id == body.student_user_id))
+    ).scalar_one_or_none()
+    if profile is None or profile.status != "active":
+        raise HTTPException(404, "دانش‌آموز فعال در ناحیه یافت نشد")
+    if profile.school_id is None:
+        raise HTTPException(400, "دانش‌آموز مدرسه‌ای ندارد")
+
+    from_school = await db.get(School, profile.school_id)
+    if from_school is None or from_school.district_id != district_id:
+        raise HTTPException(404, "دانش‌آموز در مدرسه‌ای خارج از ناحیه شماست")
+    to_school = await _district_school_or_404(db, body.to_school_id, district_id)
+    if to_school.id == from_school.id:
+        raise HTTPException(400, "مدرسه مبدأ و مقصد یکسان است")
+    if to_school.status != "active":
+        raise HTTPException(400, "مدرسه مقصد فعال نیست")
+
+    from_class_id = profile.class_id
+    # کلاس مقصد: هم‌پایه‌ترین کلاس فعال مدرسه مقصد (وگرنه بدون کلاس)
+    target_class = (
+        await db.execute(
+            select(ClassRoom)
+            .where(
+                ClassRoom.school_id == to_school.id,
+                ClassRoom.grade == profile.grade,
+                ClassRoom.status == "active",
+            )
+            .order_by(ClassRoom.id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if target_class is None:
+        target_class = (
+            await db.execute(
+                select(ClassRoom)
+                .where(ClassRoom.school_id == to_school.id, ClassRoom.status == "active")
+                .order_by(ClassRoom.id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    transfer = StudentTransfer(
+        district_id=district_id,
+        student_user_id=profile.user_id,
+        from_school_id=from_school.id,
+        to_school_id=to_school.id,
+        from_class_id=from_class_id,
+        to_class_id=target_class.id if target_class else None,
+        reason_fa=reason,
+        effective_date=body.effective_date or date.today(),
+        status="approved",
+        approved_by=current.id,
+    )
+    db.add(transfer)
+    profile.school_id = to_school.id
+    profile.class_id = target_class.id if target_class else None
+    await db.flush()
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="student_transferred",
+        entity_type="student",
+        entity_id=profile.user_id,
+        detail=(
+            f"from_school={from_school.id} to_school={to_school.id} "
+            f"from_class={from_class_id} to_class={profile.class_id} reason={reason}"
+        ),
+    )
+    await db.commit()
+    return {
+        "ok": True,
+        "transfer": {
+            "id": transfer.id,
+            "student_user_id": profile.user_id,
+            "from_school_id": from_school.id,
+            "from_school": from_school.name,
+            "to_school_id": to_school.id,
+            "to_school": to_school.name,
+            "from_class_id": from_class_id,
+            "to_class_id": profile.class_id,
+            "reason_fa": reason,
+            "effective_date": transfer.effective_date.isoformat(),
+            "status": transfer.status,
+        },
+    }
+
+
+@router.get("/transfers")
+async def list_transfers(
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """سابقه انتقال‌های ناحیه (§19) — برای شفافیت و ممیزی."""
+    rows = (
+        await db.execute(
+            select(StudentTransfer)
+            .where(StudentTransfer.district_id == district_id)
+            .order_by(StudentTransfer.created_at.desc())
+        )
+    ).scalars().all()
+    school_ids = {r.from_school_id for r in rows} | {r.to_school_id for r in rows}
+    schools = {
+        s.id: s.name
+        for s in (
+            (await db.execute(select(School).where(School.id.in_(school_ids)))).scalars()
+            if school_ids
+            else []
+        )
+    }
+    users = {
+        u.id: u.full_name
+        for u in (
+            (
+                await db.execute(
+                    select(User).where(User.id.in_({r.student_user_id for r in rows}))
+                )
+            ).scalars()
+            if rows
+            else []
+        )
+    }
+    return {
+        "district_id": district_id,
+        "total": len(rows),
+        "transfers": [
+            {
+                "id": r.id,
+                "student_user_id": r.student_user_id,
+                "student_name": users.get(r.student_user_id),
+                "from_school_id": r.from_school_id,
+                "from_school": schools.get(r.from_school_id),
+                "to_school_id": r.to_school_id,
+                "to_school": schools.get(r.to_school_id),
+                "from_class_id": r.from_class_id,
+                "to_class_id": r.to_class_id,
+                "reason_fa": r.reason_fa,
+                "effective_date": r.effective_date.isoformat(),
+                "status": r.status,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+# ------------------------- §31–§32 گزارش ناحیه و ارسال به استان -------------------------
+
+
+class ReportGenerateIn(BaseModel):
+    title_fa: str
+    period_start: date
+    period_end: date
+
+
+@router.post("/reports/generate")
+async def generate_district_report(
+    body: ReportGenerateIn,
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """ساخت پیش‌نویس گزارش مدیریتی ناحیه (§31) از تجمیع همان داده‌های
+    موجود — رویداد district_report_generated ثبت می‌شود."""
+    title = body.title_fa.strip()
+    if not title:
+        raise HTTPException(400, "عنوان گزارش الزامی است")
+    if body.period_end < body.period_start:
+        raise HTTPException(400, "پایان بازه نمی‌تواند پیش از آغاز آن باشد")
+    payload = await district_svc.district_report_payload(
+        db, district_id, body.period_start, body.period_end
+    )
+    report = DistrictReport(
+        district_id=district_id,
+        title_fa=title,
+        period_start=body.period_start,
+        period_end=body.period_end,
+        status="draft",
+        payload=payload,
+        created_by=current.id,
+    )
+    db.add(report)
+    await db.flush()
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="district_report_generated",
+        entity_type="district_report",
+        entity_id=report.id,
+        detail=f"title={title} period={body.period_start.isoformat()}..{body.period_end.isoformat()}",
+    )
+    await db.commit()
+    return {"ok": True, "report": _report_row(report)}
+
+
+@router.get("/reports")
+async def list_district_reports(
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """فهرست گزارش‌های ناحیه با وضعیت گردش کار (§32)."""
+    rows = (
+        await db.execute(
+            select(DistrictReport)
+            .where(DistrictReport.district_id == district_id)
+            .order_by(DistrictReport.created_at.desc())
+        )
+    ).scalars().all()
+    return {
+        "district_id": district_id,
+        "total": len(rows),
+        "reports": [_report_row(r) for r in rows],
+    }
+
+
+@router.get("/reports/{report_id}")
+async def district_report_detail(
+    report_id: int,
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """محتوای کامل یک گزارش ناحیه (پیش‌نویس/ارسال‌شده/برگشتی)."""
+    report = await _district_report_or_404(db, report_id, district_id)
+    row = _report_row(report)
+    row["payload"] = report.payload or {}
+    return {"report": row}
+
+
+@router.post("/reports/{report_id}/submit")
+async def submit_district_report(
+    report_id: int,
+    district_id: int = Depends(district_scope("view_district_analytics")),
+    db: AsyncSession = Depends(get_db),
+    current: AuthUser = Depends(get_current_user),
+):
+    """ارسال گزارش به استان (§32): draft/returned → submitted + ممیزی
+    province_report_submitted؛ پس از ارسال گزارش قفل می‌شود."""
+    report = await _district_report_or_404(db, report_id, district_id)
+    if report.status not in ("draft", "returned"):
+        raise HTTPException(409, "فقط پیش‌نویس یا گزارش برگشت‌خورده قابل ارسال است")
+    report.status = "submitted"
+    report.submitted_at = datetime.utcnow()
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="province_report_submitted",
+        entity_type="district_report",
+        entity_id=report.id,
+        detail=f"district={district_id}",
+    )
+    await db.commit()
+    return {"ok": True, "report": _report_row(report)}
+
+
+def _report_row(report: DistrictReport) -> dict:
+    return {
+        "id": report.id,
+        "district_id": report.district_id,
+        "title_fa": report.title_fa,
+        "period_start": report.period_start.isoformat(),
+        "period_end": report.period_end.isoformat(),
+        "status": report.status,
+        "status_fa": REPORT_STATUS_FA.get(report.status, report.status),
+        "created_at": report.created_at.isoformat() if report.created_at else None,
+        "submitted_at": report.submitted_at.isoformat() if report.submitted_at else None,
+        "reviewed_at": report.reviewed_at.isoformat() if report.reviewed_at else None,
+        "review_note": report.review_note,
+    }
+
+
+REPORT_STATUS_FA = {
+    "draft": "پیش‌نویس",
+    "submitted": "ارسال‌شده به استان",
+    "reviewed": "در حال بازبینی",
+    "returned": "برگشت‌خورده",
+    "approved": "تأییدشده",
+}
+
+
+async def _district_report_or_404(db: AsyncSession, report_id: int, district_id: int) -> DistrictReport:
+    report = await db.get(DistrictReport, report_id)
+    if report is None or report.district_id != district_id:
+        raise HTTPException(404, "گزارش در ناحیه شما یافت نشد")
+    return report

@@ -19,6 +19,7 @@ from app.main import app
 from app.models.assessment import AttemptAnswer, Exam, ExamAttempt, ExamItem
 from app.models.catalog import Topic
 from app.models.org import User
+from app.models.parent_panel import ParentMeeting, SchoolAttendance
 from app.models.rbac import AuditLog
 from app.models.slm import ErrorRecord, Evidence, PlanTask, StudentTopicState
 from app.services.assessment import grade_answers
@@ -535,3 +536,452 @@ async def test_weekly_report_cache_idempotent_and_audited(client, seeded):
     stok = await login(client, "student1")
     r = await client.get(f"/parent/children/{sid}/weekly-report", headers=auth(stok))
     assert r.status_code == 403
+
+
+# ------------------------- §2 وضعیت یادگیری به تفکیک درس -------------------------
+
+
+@pytest.mark.anyio
+async def test_subject_status_per_subject_with_trend_and_strengths(client, seeded):
+    """§2: هر درس با روند + مباحث نیازمند توجه/تثبیت‌شده + آخرین ارزیابی +
+    نقاط قوت — تا سطح مبحث قابل پیمایش است و همه متن‌ها فارسی."""
+    ptok = await login(client, "parent1")
+    sid = await child_id(client, ptok)
+
+    r = await client.get(f"/parent/children/{sid}/subjects", headers=auth(ptok))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["student_id"] == sid
+    assert body["subjects"], "دانش‌آموز seed باید دست‌کم یک درس داشته باشد"
+
+    for subj in body["subjects"]:
+        for key in (
+            "subject",
+            "current_mastery",
+            "status",
+            "status_fa",
+            "trend",
+            "trend_delta",
+            "trend_fa",
+            "topics_count",
+            "attention_count",
+            "consolidated_count",
+            "last_assessed_at",
+            "topics",
+        ):
+            assert key in subj, key
+        assert subj["trend"] in ("up", "down", "flat", "none")
+        assert subj["status"] in ("mastered", "consolidating", "weak", "unknown")
+        for t in subj["topics"]:
+            for key in (
+                "topic_id",
+                "title",
+                "mastery",
+                "status",
+                "status_fa",
+                "needs_attention",
+                "trend",
+                "suggestion_fa",
+            ):
+                assert key in t, key
+            assert t["status_fa"] and t["suggestion_fa"]
+            if t["needs_attention"]:
+                assert t["trend"] in ("up", "down", "flat", "none")
+
+    # مرتب‌سازی: درس دارای مبحث نیازمند توجه اول است
+    counts = [s["attention_count"] for s in body["subjects"]]
+    assert counts == sorted(counts, reverse=True)
+
+    assert isinstance(body["strengths"], list)
+    assert isinstance(body["attention_subjects"], list)
+    assert body["thresholds"]["mastered"] == 85.0
+    assert body["note_fa"]
+
+    # حریم خصوصی: بدون پیوند ⇐ 403
+    r = await client.get("/parent/children/6/subjects", headers=auth(ptok))
+    assert r.status_code == 403
+    stok = await login(client, "student1")
+    r = await client.get(f"/parent/children/{sid}/subjects", headers=auth(stok))
+    assert r.status_code == 403
+
+
+# ------------------------- §4 سه نوع مقایسه -------------------------
+
+
+@pytest.mark.anyio
+async def test_three_comparisons_class_gated_by_min_group(client, seeded):
+    """§4: «نسبت به خودش» + «نسبت به هدف دوره» همیشه؛ «نسبت به کالس» فقط با
+    رعایت حداقل جمعیت ۱۰ — کالس seed کمتر از ۱۰ نفر ⇒ سرکوب."""
+    ptok = await login(client, "parent1")
+    sid = await child_id(client, ptok)
+
+    r = await client.get(f"/parent/children/{sid}/comparisons", headers=auth(ptok))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["min_group"] == 10
+    assert body["class_comparison_allowed"] is True
+    assert body["comparisons"]
+
+    for row in body["comparisons"]:
+        assert {"subject", "self", "period_goal", "class"} <= set(row)
+        assert {"previous", "current", "delta"} <= set(row["self"])
+        assert row["self"]["note_fa"]
+        assert row["period_goal"]["goal"] == 70.0
+        assert {"goal", "current", "gap"} <= set(row["period_goal"])
+        cls = row["class"]
+        assert {"allowed", "class_avg", "student", "gap", "suppressed"} <= set(cls)
+        # کالسِ فرزندِ seed ۳ نفره ⇒ زیر حداقل جمعیت
+        assert cls["class_avg"] is None and cls["suppressed"] is True
+        assert cls["reason_fa"] and "حداقل جمعیت" in cls["reason_fa"]
+
+    assert body["note_fa"] and "سه نوع مقایسه" in body["note_fa"]
+
+    # حریم خصوصی
+    r = await client.get("/parent/children/6/comparisons", headers=auth(ptok))
+    assert r.status_code == 403
+
+
+# ------------------------- §9 حضور و جلسات -------------------------
+
+
+@pytest.mark.anyio
+async def test_attendance_and_sessions_sections(client, seeded):
+    """§9: حضور مدرسه + جلسات گذشته/آینده با موضوع، گزارش و تکلیف."""
+    ptok = await login(client, "parent1")
+    sid = await child_id(client, ptok)
+    today = date.today()
+
+    async with AsyncSessionLocal() as db:
+        s1 = await user_id(db, "student1")
+        tutor = await user_id(db, "tutor1")
+        db.add_all(
+            [
+                SchoolAttendance(student_user_id=s1, on_date=today - timedelta(days=1), status="present"),
+                SchoolAttendance(student_user_id=s1, on_date=today - timedelta(days=2), status="absent", note="بیماری"),
+                SchoolAttendance(student_user_id=s1, on_date=today - timedelta(days=3), status="late"),
+                ParentMeeting(
+                    student_user_id=s1,
+                    tutor_user_id=tutor,
+                    kind="private_session",
+                    subject="math",
+                    topic_fa="معادلات درجه دوم",
+                    scheduled_at=datetime.utcnow() - timedelta(days=2),
+                    status="held",
+                    report_fa="مرور خوب؛ حل مسئله چندمرحله‌ای نیاز به تمرین دارد",
+                    task_fa="۵ سؤال تمرین",
+                    task_status="pending",
+                ),
+                ParentMeeting(
+                    student_user_id=s1,
+                    tutor_user_id=tutor,
+                    kind="private_session",
+                    subject="math",
+                    topic_fa="پیش‌نیاز جبر",
+                    scheduled_at=datetime.utcnow() + timedelta(days=3),
+                    status="scheduled",
+                ),
+                ParentMeeting(
+                    student_user_id=s1,
+                    kind="parent_meeting",
+                    topic_fa="جلسه با معلم کلاس",
+                    scheduled_at=datetime.utcnow() - timedelta(days=10),
+                    status="missed",
+                ),
+            ]
+        )
+        await db.commit()
+
+    r = await client.get(f"/parent/children/{sid}/attendance", headers=auth(ptok))
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    att = body["attendance"]
+    assert att["days"] == 3
+    assert att["counts"] == {"present": 1, "absent": 1, "late": 1}
+    assert att["absent"] == 1 and att["late"] == 1
+    assert att["rate_pct"] == pytest.approx(66.7, abs=0.1)
+    assert {row["status_fa"] for row in att["rows"]} == {"حاضر", "غایب", "تاخیر"}
+
+    sess = body["sessions"]
+    assert sess["total"] == 3
+    assert len(sess["past"]) == 2 and len(sess["upcoming"]) == 1
+    assert len(sess["missed"]) == 1 and len(sess["pending_tasks"]) == 1
+    held = next(m for m in sess["past"] if m["status"] == "held")
+    assert held["topic_fa"] == "معادلات درجه دوم"
+    assert held["report_fa"] and held["task_fa"]
+    assert held["task_status_fa"] == "در انتظار"
+    assert held["tutor_name"]
+    assert held["kind_fa"] == "جلسه معلم خصوصی"
+    upcoming = sess["upcoming"][0]
+    assert upcoming["status_fa"] == "برنامه‌ریزی‌شده"
+    assert sess["missed"][0]["status_fa"] == "ازدست‌رفته"
+    assert body["note_fa"]
+
+    # حریم خصوصی
+    r = await client.get("/parent/children/6/attendance", headers=auth(ptok))
+    assert r.status_code == 403
+
+
+# ------------------------- §15 دستیار هوشمند والد -------------------------
+
+
+@pytest.mark.anyio
+async def test_parent_assistant_is_rule_based_and_child_scoped(client, seeded):
+    """§15: پاسخ فقط از داده‌ی واقعی همین فرزند + ثبت ممیزی + بدون قضاوت
+    شخصیتی + پرسش خالی/بلند → 400."""
+    ptok = await login(client, "parent1")
+    sid = await child_id(client, ptok)
+    today = date.today()
+
+    async with AsyncSessionLocal() as db:
+        s1 = await user_id(db, "student1")
+        await clean_student(db, s1)
+        topics = (await db.execute(select(Topic).order_by(Topic.id))).scalars().all()
+        t1 = topics[0]
+        db.add(
+            StudentTopicState(
+                student_user_id=s1, topic_id=t1.id, mastery=40.0, retention=0.5, stability=3.0,
+                effective_mastery=35.0, evidence_count=5, errors_by_cause={},
+                history=[
+                    {"at": (datetime.utcnow() - timedelta(days=10)).isoformat(), "m": 60.0},
+                    {"at": datetime.utcnow().isoformat(), "m": 40.0},
+                ],
+            )
+        )
+        for _ in range(2):
+            db.add(
+                ErrorRecord(
+                    student_user_id=s1,
+                    attempt_answer_id=0,
+                    topic_id=t1.id,
+                    cause="conceptual",
+                    item_snapshot={"body": "…", "correct": "A"},
+                    status="open",
+                    created_at=datetime.utcnow(),
+                )
+            )
+        await db.commit()
+
+    before = None
+    async with AsyncSessionLocal() as db:
+        before = (
+            await db.execute(select(AuditLog).where(AuditLog.action == "parent_copilot_query"))
+        ).scalars().all()
+
+    r = await client.post(
+        f"/parent/children/{sid}/assistant", headers=auth(ptok),
+        json={"question": "چرا ریاضی محمد افت کرده است؟"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["answer"] and body["answer_fa"]
+    assert body["intent"] == "drop"
+    assert body["question"]
+    # پاسخ از داده‌ی واقعی است: همان مبحث ضعیف و خطای مفهومی
+    assert t1.title_fa in body["answer"] or body["references"]["weak_topics"]
+    assert body["references"]["weak_topics"]
+    assert body["references"]["weak_topics"][0]["topic_id"] == t1.id
+    assert body["note_fa"] and "شخصیت" in body["note_fa"]
+
+    # قضاوت شخصیتی هرگز
+    for banned in ("تنبل", "بی‌استعداد", "ضعیف‌الهوش"):
+        assert banned not in body["answer"]
+    # هیچ داده‌ای از دیگران
+    assert "student2" not in body["answer"]
+
+    # پرسش خالی → 400
+    r = await client.post(
+        f"/parent/children/{sid}/assistant", headers=auth(ptok), json={"question": "   "}
+    )
+    assert r.status_code == 400
+
+    # ممیزی ثبت شده است
+    async with AsyncSessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(AuditLog).where(AuditLog.action == "parent_copilot_query")
+            )
+        ).scalars().all()
+        assert len(rows) == len(before) + 1
+        assert rows[-1].entity_id == sid
+        assert rows[-1].actor_user_id == await user_id(db, "parent1")
+
+    # حریم خصوصی: بدون پیوند ⇐ 403
+    r = await client.post(
+        "/parent/children/6/assistant", headers=auth(ptok), json={"question": "چطور است؟"}
+    )
+    assert r.status_code == 403
+
+
+# ------------------------- §17 مجوزهای هر پیوند والد–فرزند -------------------------
+
+
+@pytest.mark.anyio
+async def test_per_link_permissions_gate_sections(client, seeded):
+    """§17: هر پیوند والد–فرزند مجوز مستقل دارد؛ نبودِ ردیف = دسترسی کامل و
+    مقدار false بخشِ مربوطه را برای همان فرزند می‌بندد."""
+    ptok = await login(client, "parent1")
+    sid = await child_id(client, ptok)
+
+    # پیش‌فرض: همه کلیدها مجاز‌اند
+    r = await client.get("/parent/links", headers=auth(ptok))
+    assert r.status_code == 200, r.text
+    links = r.json()["links"]
+    assert len(links) == 1
+    link = links[0]
+    assert link["student_user_id"] == sid
+    assert all(link["permissions"].values())
+    assert link["overridden_keys"] == []
+    assert "class_comparison" in r.json()["permission_keys"]
+
+    # قبل از محدودسازی، بخش‌ها بازند
+    assert (
+        await client.get(f"/parent/children/{sid}/comparisons", headers=auth(ptok))
+    ).status_code == 200
+    assert (
+        await client.get(f"/parent/children/{sid}/attendance", headers=auth(ptok))
+    ).status_code == 200
+
+    # کلید نامعتبر → 400
+    r = await client.patch(
+        f"/parent/links/{link['link_id']}/permissions", headers=auth(ptok),
+        json={"permissions": {"nope": False}},
+    )
+    assert r.status_code == 400
+
+    # محدودسازی دو مجوز
+    r = await client.patch(
+        f"/parent/links/{link['link_id']}/permissions", headers=auth(ptok),
+        json={"permissions": {"class_comparison": False, "assistant": False}},
+    )
+    assert r.status_code == 200, r.text
+    perms = r.json()["permissions"]
+    assert perms["class_comparison"] is False and perms["assistant"] is False
+    assert perms["attendance"] is True
+
+    # مقایسه: کلاسِ مجازِ پیوند بسته شده است
+    r = await client.get(f"/parent/children/{sid}/comparisons", headers=auth(ptok))
+    assert r.status_code == 200
+    assert r.json()["class_comparison_allowed"] is False
+    for row in r.json()["comparisons"]:
+        assert row["class"]["class_avg"] is None
+        assert "مجاز نیست" in row["class"]["reason_fa"]
+
+    # دستیار: بسته ⇒ 403
+    r = await client.post(
+        f"/parent/children/{sid}/assistant", headers=auth(ptok), json={"question": "سلام"}
+    )
+    assert r.status_code == 403
+
+    # بخش‌های دیگر همچنان باز
+    assert (
+        await client.get(f"/parent/children/{sid}/attendance", headers=auth(ptok))
+    ).status_code == 200
+    assert (
+        await client.get(f"/parent/children/{sid}/exam-results", headers=auth(ptok))
+    ).status_code == 200
+
+    # بازگرداندن مجوز
+    r = await client.patch(
+        f"/parent/links/{link['link_id']}/permissions", headers=auth(ptok),
+        json={"permissions": {"assistant": True}},
+    )
+    assert r.json()["permissions"]["assistant"] is True
+    r = await client.post(
+        f"/parent/children/{sid}/assistant", headers=auth(ptok), json={"question": "سلام"}
+    )
+    assert r.status_code == 200
+
+    # رویداد ممیزی
+    async with AsyncSessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(AuditLog).where(AuditLog.action == "parent_link_permission_updated")
+            )
+        ).scalars().all()
+        assert len(rows) == 2
+        assert rows[0].entity_id == link["link_id"]
+
+    # پیوند دیگران ⇐ 404
+    r = await client.get("/parent/links", headers=auth(await login(client, "student1")))
+    assert r.status_code == 200 and r.json()["links"] == []
+
+
+# ------------------------- §11/§12 معلم خصوصی از دید والد -------------------------
+
+
+@pytest.mark.anyio
+async def test_parent_tutor_market_and_satisfaction(client, seeded):
+    """§11 بازار معلم‌ها از دید والد + §12 ثبت امتیاز رضایت (۱ تا ۵)."""
+    ptok = await login(client, "parent1")
+    sid = await child_id(client, ptok)
+
+    r = await client.get("/parent/tutors", headers=auth(ptok))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] >= 1
+    tutor = next(t for t in body["tutors"] if "math" in (t["subjects"] or []))
+    assert tutor["name"] and tutor["headline"]
+    assert body["note_fa"] and "§11" not in body["note_fa"] or body["note_fa"]
+
+    # فیلتر درس
+    r = await client.get("/parent/tutors", headers=auth(ptok), params={"subject": "physics"})
+    assert r.status_code == 200
+    assert all("physics" in (t["subjects"] or []) for t in r.json()["tutors"])
+
+    # امتیاز نامعتبر → 400
+    r = await client.post(
+        "/parent/tutor-satisfaction", headers=auth(ptok),
+        json={"student_user_id": sid, "tutor_user_id": tutor["user_id"], "rating": 9},
+    )
+    assert r.status_code == 400
+
+    # معلم ناموجود ⇐ 404
+    r = await client.post(
+        "/parent/tutor-satisfaction", headers=auth(ptok),
+        json={"student_user_id": sid, "tutor_user_id": 99999, "rating": 5},
+    )
+    assert r.status_code == 404
+
+    # ثبت موفق + به‌روزرسانی (upsert)
+    r = await client.post(
+        "/parent/tutor-satisfaction", headers=auth(ptok),
+        json={
+            "student_user_id": sid,
+            "tutor_user_id": tutor["user_id"],
+            "rating": 4,
+            "comment": "حل تمرین عالی بود",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["rating"] == 4
+
+    r = await client.post(
+        "/parent/tutor-satisfaction", headers=auth(ptok),
+        json={"student_user_id": sid, "tutor_user_id": tutor["user_id"], "rating": 5},
+    )
+    assert r.status_code == 200 and r.json()["rating"] == 5
+
+    r = await client.get(
+        "/parent/tutor-satisfaction", headers=auth(ptok), params={"student_user_id": sid}
+    )
+    assert r.status_code == 200
+    rows = r.json()["rows"]
+    assert len(rows) == 1  # upsert: ردیف تکراری ساخته نمی‌شود
+    assert rows[0]["rating"] == 5 and rows[0]["tutor_name"]
+
+    # فرزندِ بدون پیوند ⇐ 403
+    r = await client.post(
+        "/parent/tutor-satisfaction", headers=auth(ptok),
+        json={"student_user_id": 6, "tutor_user_id": tutor["user_id"], "rating": 3},
+    )
+    assert r.status_code == 403
+
+    # ممیزی
+    async with AsyncSessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(AuditLog).where(AuditLog.action == "tutor_satisfaction_saved")
+            )
+        ).scalars().all()
+        assert len(rows) == 2

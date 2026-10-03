@@ -88,12 +88,54 @@ async def school_overview(
         key = status_of(st.effective_mastery, st.evidence_count)
         status_counts[key] = status_counts.get(key, 0) + 1
 
+    # ---- KPIهای §2 سند مدیر: ماندگاری، رشد نسبت به دوره قبل، مباحث بحرانی،
+    # کلاس‌های دارای افت و معلمان نیازمند بررسی (بدون هیچ رقم ساختگی) ----
+    retention_values = [st.retention for st in states if st.evidence_count >= 3]
+    avg_retention = round(sum(retention_values) / len(retention_values), 3) if retention_values else None
+
+    # رشد = میانگین (E فعلی − E نخستین ثبت تاریخچه) روی مباحثی با ≥۲ ثبت
+    deltas = [
+        st.effective_mastery - float(st.history[0].get("e", st.effective_mastery))
+        for st in states
+        if len(st.history or []) >= 2
+    ]
+    growth = round(sum(deltas) / len(deltas), 1) if deltas else None
+
+    critical_topics = {st.topic_id for st in states if status_of(st.effective_mastery, st.evidence_count) == "critical"}
+
+    # کلاس‌های دارای افت: از همان §7 مقایسه، روی همهٔ درس‌های فعال مدرسه
+    subjects = set(
+        (
+            await db.execute(
+                select(ClassTeacherAssignment.subject)
+                .join(ClassRoom, ClassRoom.id == ClassTeacherAssignment.class_id)
+                .where(ClassRoom.school_id == school_id, ClassTeacherAssignment.status == "active")
+            )
+        ).scalars()
+    )
+    drop_classes: set[int] = set()
+    for subject in subjects:
+        cmp = await school_svc.compare_classes(db, school_id, subject)
+        for row in cmp["rows"]:
+            if row.get("drop_flag"):
+                drop_classes.add(row["class_id"])
+
+    flags_payload = await school_svc.attention_flags(db, school_id)
+    teachers_flagged = {f["teacher_name"] for f in flags_payload["flags"] if f.get("teacher_name")}
+
     return {
         "school": {"id": school.id, "name": school.name, "type": school.school_type, "ownership": school.ownership_type},
         "students_count": len(student_ids),
         "avg_effective_mastery": avg_mastery,
+        "avg_retention": avg_retention,
+        "growth_vs_prev": growth,
         "needs_intervention": status_counts["critical"] + status_counts["weak"],
+        "critical_topics_count": len(critical_topics),
+        "drop_classes_count": len(drop_classes),
+        "drop_class_ids": sorted(drop_classes),
+        "teachers_flagged_count": len(teachers_flagged),
         "status_counts": status_counts,
+        "note_fa": "رشد = تغییر میانگین تسط مؤثر نسبت به نخستین ثبت هر مبحث؛ بدون تاریخچه کافی «—» نشان داده می‌شود.",
     }
 
 
@@ -161,14 +203,25 @@ async def school_student_detail_endpoint(
     current: AuthUser = Depends(require_permission("view_students", scope_type="school", scope_param="school_id")),
     db: AsyncSession = Depends(get_db),
 ):
-    """§13 نمای فردی دانش‌آموز برای مدیر: تسط/ماندگاری/رتبه کلاسی/روند +
-    خطاها/مباحث بحرانی/تکمیل تمرین + مشکل اصلی + چرخه مداخله + آزمون‌های اخیر."""
+    """§13 نمای فردی دانش‌آموز برای مدیر: تسلط/ماندگاری/رتبه/روند + خطاها +
+    مباحث بحرانی + تکمیل تمرین + مشکل اصلی + چرخه مداخله + آزمون‌های اخیر."""
     if await db.get(School, school_id) is None:
         raise HTTPException(404, "مدرسه یافت نشد")
     try:
-        return await school_views.student_detail(db, school_id, user_id)
+        payload = await school_views.student_detail(db, school_id, user_id)
     except LookupError:
         raise HTTPException(404, "این دانش‌آموز در این مدرسه ثبت نشده است")
+    # دید فردی دانش‌آموز حساس است → هر بازدید در لاگ ممیزی ثبت می‌شود (RBAC §17)
+    await log_action(
+        db,
+        actor_user_id=current.id,
+        action="student_profile_viewed",
+        entity_type="student",
+        entity_id=user_id,
+        detail=f"school={school_id}",
+    )
+    await db.commit()
+    return payload
 
 
 @router.get("/classes/{class_id}/diagnosis")
@@ -556,6 +609,44 @@ async def my_permissions(current: AuthUser = Depends(get_current_user), db: Asyn
     keys = await effective_permissions(db, current.id)
     scopes = await user_scopes(db, current.id)
     return {"permissions": sorted(keys), "scopes": scopes}
+
+
+@router.get("/my/schools")
+async def my_schools(current: AuthUser = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """مدرسه‌هایی که تماس‌گیرنده دید تحلیل مدرسه دارد — مبنای انتخاب school_id
+    در داشبورد /admin و برد مدرسه. پیش از این فرانت‌اند school/1 را hardcode
+    می‌کرد و برای مدرسه/ناحیه‌ای غیر از مدرسهٔ ۱ کل داشبورد خالی یا 403 می‌شد."""
+    visible = await visible_school_ids(db, current.id, "view_school_analytics")
+    q = select(School).order_by(School.id)
+    if visible is not None:
+        if not visible:
+            visible = await _fallback_school_ids(db, current.id)
+        if not visible:
+            return {"schools": [], "default_id": None}
+        q = q.where(School.id.in_(sorted(visible)))
+    schools = (await db.execute(q)).scalars().all()
+    return {
+        "schools": [{"id": s.id, "name": s.name} for s in schools],
+        "default_id": schools[0].id if schools else None,
+    }
+
+
+async def _fallback_school_ids(db: AsyncSession, user_id: int) -> set[int]:
+    """بدون مجوزِ تحلیل مدرسه: مدرسهٔ خودِ کاربر (پروفایل دانش‌آموز یا تخصیص
+    فعال مدرسه) تا نقش‌هایی مثل دانش‌آموز/معلم بتوانند برد مدرسهٔ خودشان را ببینند."""
+    profile = (
+        await db.execute(select(StudentProfile.school_id).where(StudentProfile.user_id == user_id))
+    ).scalar_one_or_none()
+    if profile is not None:
+        return {profile}
+    rows = (
+        await db.execute(
+            select(SchoolAssignment.school_id)
+            .join(Employee, Employee.id == SchoolAssignment.employee_id)
+            .where(Employee.user_id == user_id, SchoolAssignment.status == "active")
+        )
+    ).all()
+    return {sid for (sid,) in rows}
 
 
 # ------------------------- معاونان (RBAC spec §6) -------------------------

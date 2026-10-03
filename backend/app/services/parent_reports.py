@@ -17,7 +17,9 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.models.assessment import AttemptAnswer, Exam, ExamAttempt, ExamItem, QuestionItem
-from app.models.catalog import Topic
+from app.models.catalog import Book, Chapter, Topic
+from app.models.org import StudentProfile, User
+from app.models.parent_panel import ParentMeeting, SchoolAttendance
 from app.models.slm import ErrorRecord, Evidence, PlanTask, StudentTopicState
 from app.services.slm import status_of
 
@@ -34,6 +36,9 @@ MAX_RETENTION_ALERTS = 2
 MAX_INTERVENTION_ALERTS = 2
 
 SEVERITY_RANK = {"danger": 0, "warning": 1, "info": 2}
+
+# هدف تسط دوره برای «نسبت به هدف دوره» (سند §4) — یک برنامه‌ریزی، نه نمره‌ی دیگران
+PERIOD_GOAL_MASTERY = 70.0
 
 CAUSE_FA = {
     "conceptual": "مفهومی",
@@ -908,3 +913,698 @@ def _count_pairs(rows) -> list[tuple[tuple, int]]:
         key = (e.topic_id, e.cause)
         counts[key] = counts.get(key, 0) + 1
     return list(counts.items())
+
+
+# -------------------------------- §2 وضعیت یادگیری به تفکیک درس -------------------------------
+
+STATUS_FA = {
+    "mastered": "مسلط",
+    "consolidating": "در حال تثبیت",
+    "weak": "ضعیف",
+    "critical": "بحرانی",
+    "unknown": "نیازمند داده",
+}
+
+TREND_FA = {"up": "↑ بهبود", "down": "↓ افت", "flat": "→ بدون تغییر", "none": "—"}
+
+
+async def _subject_of_topics(db: AsyncSession) -> dict[int, str]:
+    """مبحث ← درس: Topic ← Chapter ← Book.subject (یک کوئری، بدون N+1)."""
+    rows = (
+        await db.execute(
+            select(Topic.id, Chapter.book_id)
+            .join(Chapter, Chapter.id == Topic.chapter_id)
+        )
+    ).all()
+    if not rows:
+        return {}
+    book_ids = {book_id for _tid, book_id in rows}
+    books = {
+        b.id: b.subject
+        for b in (
+            (await db.execute(select(Book).where(Book.id.in_(book_ids)))).scalars()
+            if book_ids
+            else []
+        )
+    }
+    return {topic_id: books.get(book_id) for topic_id, book_id in rows}
+
+
+def _history_trend(history: list | None) -> tuple[str, float | None]:
+    """روند از روی history خودِ SLM (بدون ساخت عدد بیرونی): دو مقدار آخرِ tسط."""
+    if not history or len(history) < 2:
+        return "none", None
+    entries = sorted(history, key=lambda h: str(h.get("at") or ""))
+    prev = entries[-2].get("m")
+    last = entries[-1].get("m")
+    if prev is None or last is None:
+        return "none", None
+    delta = round(float(last) - float(prev), 1)
+    if delta > 0.5:
+        return "up", delta
+    if delta < -0.5:
+        return "down", delta
+    return "flat", delta
+
+
+async def subject_status(db: AsyncSession, student_id: int) -> dict:
+    """سند §2: وضعیت هر درس با روند + مباحث نیازمند توجه/تثبیت‌شده +
+    تاریخ آخرین ارزیابی + نقاط قوت — تا سطح مبحث قابل پیمایش است."""
+    s = get_settings()
+    states = await _states_of(db, student_id)
+    topics = await _topics_map(db)
+    subject_of = await _subject_of_topics(db)
+
+    # آخرین ارزیابی هر مبحث از history (خودِ داده‌ی SLM)
+    last_eval: dict[int, datetime] = {}
+    for st in states:
+        for h in st.history or []:
+            at = _naive_utc(datetime.fromisoformat(h["at"]) if isinstance(h.get("at"), str) else h.get("at"))
+            if at and (st.topic_id not in last_eval or at > last_eval[st.topic_id]):
+                last_eval[st.topic_id] = at
+
+    errors = await _open_errors_of(db, student_id)
+    cause_by_topic: dict[int, dict[str, int]] = {}
+    for e in errors:
+        cause_by_topic.setdefault(e.topic_id, {})[e.cause] = (
+            cause_by_topic.get(e.topic_id, {}).get(e.cause, 0) + 1
+        )
+
+    by_subject: dict[str, list[StudentTopicState]] = {}
+    for st in states:
+        subj = subject_of.get(st.topic_id) or "other"
+        by_subject.setdefault(subj, []).append(st)
+
+    subjects = []
+    for subj, rows in sorted(by_subject.items()):
+        with_data = [r for r in rows if r.evidence_count >= s.evidence_min_for_status]
+        suppressed = False  # نمای والد همیشه روی یک فرزند است؛ قاعده حداقل جمعیت اینجا معنا ندارد
+        mastery = (
+            round(sum(r.effective_mastery for r in with_data) / len(with_data), 1)
+            if with_data
+            else None
+        )
+        statuses = [status_of(r.effective_mastery, r.evidence_count) for r in rows]
+        attention = [r for r in rows if status_of(r.effective_mastery, r.evidence_count) in ("weak", "critical")]
+        consolidated = [r for r in rows if status_of(r.effective_mastery, r.evidence_count) == "mastered"]
+
+        # روند درس: میانگین Δ دو مقدار آخرِ history مباحث آن درس
+        deltas = [d for r in rows for d in [_history_trend(r.history)[1]] if d is not None]
+        if deltas:
+            avg_delta = round(sum(deltas) / len(deltas), 1)
+            trend = "up" if avg_delta > 0.5 else "down" if avg_delta < -0.5 else "flat"
+        else:
+            avg_delta, trend = None, "none"
+
+        # خطای غالب و افت اخیر
+        causes: dict[str, int] = {}
+        recent_drop = None
+        for r in rows:
+            for c, n in cause_by_topic.get(r.topic_id, {}).items():
+                causes[c] = causes.get(c, 0) + n
+            tr, dl = _history_trend(r.history)
+            if tr == "down" and dl is not None:
+                recent_drop = r.topic_id
+        dominant = max(causes, key=causes.get) if causes else None
+
+        subject_rows = sorted(
+            rows,
+            key=lambda r: (status_of(r.effective_mastery, r.evidence_count) != "weak"
+                           and status_of(r.effective_mastery, r.evidence_count) != "critical",
+                           r.effective_mastery),
+        )
+        topic_rows = []
+        for r in subject_rows:
+            t = topics.get(r.topic_id)
+            if t is None:
+                continue
+            st_key = status_of(r.effective_mastery, r.evidence_count)
+            tr, dl = _history_trend(r.history)
+            weak_causes = sorted(
+                cause_by_topic.get(r.topic_id, {}), key=cause_by_topic[r.topic_id].get, reverse=True
+            )
+            similar = sum(cause_by_topic.get(r.topic_id, {}).values())
+            topic_rows.append(
+                {
+                    "topic_id": r.topic_id,
+                    "title": t.title_fa,
+                    "mastery": round(r.effective_mastery, 1),
+                    "status": st_key,
+                    "status_fa": STATUS_FA[st_key],
+                    "needs_attention": st_key in ("weak", "critical"),
+                    "trend": tr,
+                    "trend_delta": dl,
+                    "trend_fa": TREND_FA[tr],
+                    "dominant_error": weak_causes[0] if weak_causes else None,
+                    "dominant_error_fa": CAUSE_FA.get(weak_causes[0], weak_causes[0]) if weak_causes else None,
+                    "similar_errors": similar,
+                    "last_evidence_at": _iso(last_eval.get(r.topic_id)),
+                    "suggestion_fa": (
+                        "مرور پیش‌نیاز + آزمون کوتاه"
+                        if st_key in ("weak", "critical")
+                        else "تمرین هدفمند برای تثبیت"
+                        if st_key == "consolidating"
+                        else "مرور فاصله‌دار برای ماندگاری"
+                    ),
+                }
+            )
+
+        subjects.append(
+            {
+                "subject": None if subj == "other" else subj,
+                "current_mastery": mastery,
+                "status": (
+                    "unknown"
+                    if mastery is None
+                    else "mastered"
+                    if mastery >= s.threshold_mastered
+                    else "consolidating"
+                    if mastery >= s.threshold_consolidating
+                    else "weak"
+                ),
+                "status_fa": (
+                    "نیازمند داده"
+                    if mastery is None
+                    else "مسلط"
+                    if mastery >= s.threshold_mastered
+                    else "در حال تثبیت"
+                    if mastery >= s.threshold_consolidating
+                    else "ضعیف"
+                ),
+                "trend": trend,
+                "trend_delta": avg_delta,
+                "trend_fa": TREND_FA[trend],
+                "topics_count": len(rows),
+                "attention_count": len(attention),
+                "consolidated_count": len(consolidated),
+                "dominant_error_fa": CAUSE_FA.get(dominant, dominant) if dominant else None,
+                "recent_drop_topic_id": recent_drop,
+                "last_assessed_at": _iso(max(last_eval.values())) if last_eval else None,
+                "suppressed": suppressed,
+                "topics": topic_rows,
+            }
+        )
+    # مرتب‌سازی: درس‌های نیازمند توجه اول (نمایش قابل اقدام برای والد)
+    subjects.sort(key=lambda r: (-r["attention_count"], r["current_mastery"] if r["current_mastery"] is not None else -1))
+
+    strengths = [
+        {"subject": r["subject"], "current_mastery": r["current_mastery"]}
+        for r in subjects
+        if r["current_mastery"] is not None and r["current_mastery"] >= s.threshold_mastered
+    ]
+    attention_subjects = [
+        {"subject": r["subject"], "attention_count": r["attention_count"]}
+        for r in subjects
+        if r["attention_count"]
+    ]
+
+    return {
+        "student_id": student_id,
+        "subjects": subjects,
+        "strengths": strengths,
+        "attention_subjects": attention_subjects,
+        "thresholds": {
+            "mastered": s.threshold_mastered,
+            "consolidating": s.threshold_consolidating,
+            "weak": s.threshold_weak,
+        },
+        "note_fa": (
+            "هر درس با روند، تعداد مباحث نیازمند توجه/تثبیت‌شده و تاریخ آخرین ارزیابی نمایش "
+            "داده می‌شود؛ درصدهای خام بدون روند معنا ندارند (سند والدین §2)."
+        ),
+    }
+
+
+# -------------------------------- §4 سه نوع مقایسه -------------------------------
+
+
+async def comparisons(db: AsyncSession, student_id: int, class_allowed: bool = True) -> dict:
+    """سند §4: سه مقایسه — «نسبت به خودش»، «نسبت به هدف دوره» و «نسبت به کالس»
+    (آخری فقط در صورت مجاز بودنِ مجوزِ پیوند و رعایت حداقل جمعیت کالس)."""
+    s = get_settings()
+    states = await _states_of(db, student_id)
+    subject_of = await _subject_of_topics(db)
+
+    profile = (
+        await db.execute(select(StudentProfile).where(StudentProfile.user_id == student_id))
+    ).scalar_one_or_none()
+
+    by_subject: dict[str, list[StudentTopicState]] = {}
+    for st in states:
+        by_subject.setdefault(subject_of.get(st.topic_id) or "other", []).append(st)
+
+    # میانگین کالس (هم‌کلاسی‌ها، بدون خودِ فرزند) — سرکوب زیر حداقل جمعیت
+    class_avg: dict[str, float | None] = {}
+    class_sizes: dict[str, int] = {}
+    if profile is not None and profile.class_id is not None:
+        peer_ids = [
+            p.user_id
+            for p in (
+                (
+                    await db.execute(
+                        select(StudentProfile).where(StudentProfile.class_id == profile.class_id)
+                    )
+                ).scalars()
+            )
+            if p.user_id != student_id
+        ]
+        peers = list(
+            (
+                await db.execute(
+                    select(StudentTopicState).where(StudentTopicState.student_user_id.in_(peer_ids))
+                )
+            ).scalars()
+            if peer_ids
+            else []
+        )
+        by_subj_peers: dict[str, list[StudentTopicState]] = {}
+        for st in peers:
+            by_subj_peers.setdefault(subject_of.get(st.topic_id) or "other", []).append(st)
+        for subj in by_subject:
+            rows = [
+                r
+                for r in by_subj_peers.get(subj, [])
+                if r.evidence_count >= s.evidence_min_for_status
+            ]
+            class_sizes[subj] = len({r.student_user_id for r in rows})
+            if class_allowed and class_sizes[subj] >= s.min_group_size:
+                class_avg[subj] = round(sum(r.effective_mastery for r in rows) / len(rows), 1)
+            else:
+                class_avg[subj] = None
+
+    goal = PERIOD_GOAL_MASTERY
+    rows = []
+    for subj, subj_states in sorted(by_subject.items()):
+        with_data = [r for r in subj_states if r.evidence_count >= s.evidence_min_for_status]
+        current = (
+            round(sum(r.effective_mastery for r in with_data) / len(with_data), 1)
+            if with_data
+            else None
+        )
+        # نسبت به خودش: میانگین Δ دو مقدار آخر history
+        deltas = [d for r in subj_states for d in [_history_trend(r.history)[1]] if d is not None]
+        self_delta = round(sum(deltas) / len(deltas), 1) if deltas else None
+        previous = None if current is None or self_delta is None else round(current - self_delta, 1)
+
+        avg = class_avg.get(subj)
+        rows.append(
+            {
+                "subject": None if subj == "other" else subj,
+                "self": {
+                    "previous": previous,
+                    "current": current,
+                    "delta": self_delta,
+                    "note_fa": "مقایسه با وضعیت خودِ فرزند در دوره/ارزیابی قبلی.",
+                },
+                "period_goal": {
+                    "goal": goal,
+                    "current": current,
+                    "gap": None if current is None else round(current - goal, 1),
+                    "note_fa": "هدف دوره یک عدد برنامه‌ریزی‌شده است، نه نمره‌ی دیگران.",
+                },
+                "class": {
+                    "allowed": class_allowed,
+                    "class_avg": avg,
+                    "student": current,
+                    "gap": None if avg is None or current is None else round(current - avg, 1),
+                    "suppressed": avg is None,
+                    "reason_fa": (
+                        None
+                        if avg is not None
+                        else (
+                            "نمایش میانگین کالس برای این درس مجاز نیست (مجوزِ پیوند والد–فرزند)."
+                            if not class_allowed
+                            else f"زیر حداقل جمعیت {s.min_group_size} نفر؛ میانگین کالس نمایش داده نمی‌شود."
+                        )
+                    ),
+                },
+            }
+        )
+
+    return {
+        "student_id": student_id,
+        "min_group": s.min_group_size,
+        "class_comparison_allowed": class_allowed,
+        "comparisons": rows,
+        "note_fa": (
+            "سه نوع مقایسه وجود دارد و رتبه تنها معیار موفقیت نیست؛ مقایسه با کالس فقط در "
+            "صورت مجاز بودن مجوزِ همین پیوند والد–فرزند و رعایت حداقل جمعیت نمایش داده می‌شود "
+            "(سند والدین §4 و §17)."
+        ),
+    }
+
+
+# ------------------------------- §9 حضور و جلسات --------------------------------
+
+
+async def attendance_and_sessions(db: AsyncSession, student_id: int) -> dict:
+    """سند §9: حضور مدرسه + جلسات گذشته/آینده (خصوصی/مدرسه/جلسه با والد) با
+    موضوع، گزارش، تکلیف و وضعیت انجام آن."""
+    today = date.today()
+    attendance = list(
+        (
+            await db.execute(
+                select(SchoolAttendance)
+                .where(SchoolAttendance.student_user_id == student_id)
+                .order_by(SchoolAttendance.on_date.desc())
+                .limit(60)
+            )
+        ).scalars()
+    )
+    counts: dict[str, int] = {}
+    for a in attendance:
+        counts[a.status] = counts.get(a.status, 0) + 1
+    present_like = counts.get("present", 0) + counts.get("late", 0) + counts.get("excused", 0)
+    attendance_rate = (
+        round(100.0 * present_like / len(attendance), 1) if attendance else None
+    )
+
+    meetings = list(
+        (
+            await db.execute(
+                select(ParentMeeting)
+                .where(ParentMeeting.student_user_id == student_id)
+                .order_by(ParentMeeting.scheduled_at.desc())
+            )
+        ).scalars()
+    )
+    tutor_ids = {m.tutor_user_id for m in meetings if m.tutor_user_id}
+    tutors = {
+        u.id: u.full_name
+        for u in (
+            ((await db.execute(select(User).where(User.id.in_(tutor_ids)))).scalars()
+             if tutor_ids else [])
+        )
+    }
+
+    KIND_FA = {
+        "private_session": "جلسه معلم خصوصی",
+        "school_session": "جلسه مدرسه",
+        "parent_meeting": "جلسه والدین و معلم",
+    }
+    STATUS_FA_M = {
+        "scheduled": "برنامه‌ریزی‌شده",
+        "held": "برگزارشده",
+        "missed": "ازدست‌رفته",
+        "cancelled": "لغوشده",
+    }
+    TASK_FA = {"pending": "در انتظار", "done": "انجام شده", "skipped": "انجام نشد"}
+
+    def _m_row(m: ParentMeeting) -> dict:
+        return {
+            "id": m.id,
+            "kind": m.kind,
+            "kind_fa": KIND_FA.get(m.kind, m.kind),
+            "subject": m.subject,
+            "topic_fa": m.topic_fa,
+            "tutor_user_id": m.tutor_user_id,
+            "tutor_name": tutors.get(m.tutor_user_id),
+            "scheduled_at": _iso(m.scheduled_at),
+            "duration_min": m.duration_min,
+            "status": m.status,
+            "status_fa": STATUS_FA_M.get(m.status, m.status),
+            "report_fa": m.report_fa,
+            "task_fa": m.task_fa,
+            "task_status": m.task_status,
+            "task_status_fa": TASK_FA.get(m.task_status, m.task_status),
+            "is_past": _naive_utc(m.scheduled_at) is not None
+            and _naive_utc(m.scheduled_at) < datetime.utcnow(),
+        }
+
+    now = datetime.utcnow()
+    past = [m for m in meetings if (_naive_utc(m.scheduled_at) or now) <= now]
+    upcoming = [m for m in meetings if (_naive_utc(m.scheduled_at) or now) > now]
+    missed = [m for m in meetings if m.status == "missed"]
+    pending_tasks = [m for m in meetings if m.task_fa and m.task_status in (None, "pending")]
+
+    return {
+        "student_id": student_id,
+        "attendance": {
+            "days": len(attendance),
+            "rate_pct": attendance_rate,
+            "counts": counts,
+            "absent": counts.get("absent", 0),
+            "late": counts.get("late", 0),
+            "excused": counts.get("excused", 0),
+            "rows": [
+                {
+                    "on_date": a.on_date.isoformat(),
+                    "status": a.status,
+                    "status_fa": {
+                        "present": "حاضر",
+                        "absent": "غایب",
+                        "late": "تاخیر",
+                        "excused": "غیبت موجه",
+                    }.get(a.status, a.status),
+                    "note": a.note,
+                }
+                for a in attendance
+            ],
+        },
+        "sessions": {
+            "total": len(meetings),
+            "upcoming": [_m_row(m) for m in upcoming],
+            "past": [_m_row(m) for m in past],
+            "missed": [_m_row(m) for m in missed],
+            "pending_tasks": [_m_row(m) for m in pending_tasks],
+        },
+        "note_fa": (
+            "حضور و جلسات فقط برای همین فرزند نمایش داده می‌شود؛ گزارش جلسه و تکلیف آن از "
+            "همان جریان معلم خصوصی می‌آید (سند والدین §9)."
+        ),
+    }
+
+
+# ----------------------------- §15 دستیار هوشمند والد ----------------------------
+
+ASSISTANT_MAX_Q = 400
+
+_INTENTS = (
+    ("drop", ("افت", "پایین", "ضعیف", "مشکل", "چرا")),
+    ("best", ("مهم‌ترین", "بزرگ‌ترین", "الان", "اولویت")),
+    ("effective", ("مؤثر", "مفيد", "مفید", "تاثیر", "اثر", "انجام داده")),
+    ("progress", ("پیشرفت", "بهبود", "بهتر شد", "پیشرفت‌ای")),
+    ("meeting", ("جلسه", "معلم", "مطرح", "بپرسم")),
+)
+
+
+def _detect_intent(q: str) -> str:
+    for key, words in _INTENTS:
+        if any(w in q for w in words):
+            return key
+    return "general"
+
+
+async def assistant_answer(db: AsyncSession, student_id: int, question: str) -> dict:
+    """سند §15: پاسخ فقط بر پایه‌ی داده‌ی واقعیِ همان فرزند (مباحث، خطاها،
+    آزمون‌ها، فعالیت و مداخله‌ها) — قاعده‌محور و بدون مدل بیرونی؛ هرگز قضاوت
+    شخصیتی/روان‌شناختی نمی‌کند و هیچ داده‌ای از دیگران را فاش نمی‌کند."""
+    q = (question or "").strip()
+    if not q:
+        raise ValueError("پرسش خالی است")
+    if len(q) > ASSISTANT_MAX_Q:
+        raise ValueError("پرسش بیش از حد طولانی است")
+
+    s = get_settings()
+    pm = await progress_mastery(db, student_id)
+    states: list[StudentTopicState] = pm["states"]
+    topics: dict[int, Topic] = pm["topics"]
+    subject_of = await _subject_of_topics(db)
+    errors = await _open_errors_of(db, student_id)
+    attempts = await _graded_attempts(db, student_id)
+
+    # مباحث ضعیف/بحرانی با علت غالب
+    weak_rows = []
+    for st in states:
+        k = status_of(st.effective_mastery, st.evidence_count)
+        if k not in ("weak", "critical"):
+            continue
+        causes: dict[str, int] = {}
+        for e in errors:
+            if e.topic_id == st.topic_id:
+                causes[e.cause] = causes.get(e.cause, 0) + 1
+        dominant = max(causes, key=causes.get) if causes else None
+        weak_rows.append(
+            {
+                "topic_id": st.topic_id,
+                "title": topics[st.topic_id].title_fa if st.topic_id in topics else f"#{st.topic_id}",
+                "subject": subject_of.get(st.topic_id),
+                "mastery": round(st.effective_mastery, 1),
+                "status": k,
+                "dominant_error_fa": CAUSE_FA.get(dominant, dominant) if dominant else None,
+                "error_count": sum(causes.values()),
+            }
+        )
+    weak_rows.sort(key=lambda r: r["mastery"])
+
+    strong_rows = sorted(
+        [
+            {
+                "topic_id": st.topic_id,
+                "title": topics[st.topic_id].title_fa if st.topic_id in topics else f"#{st.topic_id}",
+                "subject": subject_of.get(st.topic_id),
+                "mastery": round(st.effective_mastery, 1),
+            }
+            for st in states
+            if status_of(st.effective_mastery, st.evidence_count) == "mastered"
+        ],
+        key=lambda r: -r["mastery"],
+    )
+
+    # پیشرفت از روی history (دو مقدار آخر) — همان داده‌ی SLM
+    improved, declined = [], []
+    for st in states:
+        tr, dl = _history_trend(st.history)
+        if tr == "up" and dl is not None:
+            improved.append((dl, st.topic_id))
+        elif tr == "down" and dl is not None:
+            declined.append((dl, st.topic_id))
+    improved.sort(reverse=True)
+    declined.sort(reverse=True)
+
+    percents = [float(a.percent) for a in attempts if a.percent is not None]
+    exam_avg = round(sum(percents) / len(percents), 1) if percents else None
+    exam_delta = round(percents[-1] - percents[-2], 1) if len(percents) >= 2 else None
+
+    intent = _detect_intent(q)
+    subject_hint = None
+    for subj, fa in SUBJECT_HINTS.items():
+        if fa in q or subj in q:
+            subject_hint = subj
+            break
+
+    def _subj(rows: list[dict]) -> list[dict]:
+        return [r for r in rows if subject_hint is None or r.get("subject") == subject_hint]
+
+    lines: list[str] = []
+    if intent == "drop":
+        rows = _subj(weak_rows)
+        if rows:
+            top = rows[0]
+            lines.append(
+                f"در «{top['title']}» تسط فعلی {fa_num(top['mastery'])}٪ و وضعیت "
+                f"{STATUS_FA[top['status']]} است."
+            )
+            if top["dominant_error_fa"]:
+                lines.append(
+                    f"خطای غالب ثبت‌شده {top['dominant_error_fa']} است ({fa_num(top['error_count'])} مورد باز)."
+                )
+            lines.append("پیشنهاد: ۲۰ دقیقه مرور پیش‌نیاز، سپس ۵ سؤال هدفمند و آزمون کوتاه.")
+        else:
+            lines.append("برای این درس مبحثی با وضعیت ضعیف/بحرانی ثبت نشده است.")
+        if exam_delta is not None and exam_delta < 0:
+            lines.append(
+                f"میانگین درصد آزمون‌های اخیر {fa_num(exam_avg)}٪ است و نسبت به آزمون قبلی "
+                f"{fa_num(exam_delta)} واحد تغییر داشته است."
+            )
+    elif intent == "best":
+        rows = _subj(weak_rows) or weak_rows
+        if rows:
+            top = rows[0]
+            lines.append(
+                f"مهم‌ترین مبحث نیازمند توجه «{top['title']}» است "
+                f"(تسط {fa_num(top['mastery'])}٪"
+                + (f"، خطای غالب {top['dominant_error_fa']}" if top["dominant_error_fa"] else "")
+                + ")."
+            )
+            lines.append("اقدام: مرور پیش‌نیاز + آزمون کوتاه در همین هفته.")
+        else:
+            lines.append("مبحث نیازمند توجهی ثبت نشده است.")
+    elif intent == "effective":
+        tasks = pm["tasks"]
+        done = sum(1 for t in tasks if t.status == "done")
+        lines.append(
+            f"{fa_num(done)} از {fa_num(len(tasks))} کارِ برنامه انجام شده است "
+            f"(پیشرفت {fa_num(pm['progress_pct'])}٪)."
+        )
+        if improved:
+            title = topics[improved[0][1]].title_fa if improved[0][1] in topics else ""
+            lines.append(f"بهبود مشاهده‌شده: «{title}» با {fa_num(improved[0][0])} واحد رشد تسط.")
+        else:
+            lines.append("در داده‌های اخیر بهبود معناداری ثبت نشده است.")
+        if weak_rows:
+            lines.append(
+                f"اما {fa_num(len(weak_rows))} مبحث همچنان زیر آستانه تثبیت است؛ اولویت با همان‌هاست."
+            )
+    elif intent == "progress":
+        if improved:
+            lines.append(
+                "دروس/مباحث دارای پیشرفت: "
+                + "، ".join(
+                    f"{topics[t].title_fa if t in topics else '#' + str(t)} (+{fa_num(d)} واحد)"
+                    for d, t in improved[:5]
+                )
+                + "."
+            )
+        else:
+            lines.append("در دو ماه اخیر بهبود معناداری در تسط مباحث ثبت نشده است.")
+        if declined:
+            lines.append(
+                "مباحثی که افت داشته‌اند: "
+                + "، ".join(
+                    f"{topics[t].title_fa if t in topics else '#' + str(t)} ({fa_num(d)} واحد)"
+                    for d, t in declined[:3]
+                )
+                + "."
+            )
+    elif intent == "meeting":
+        lines.append("موضوعات پیشنهادی برای جلسه با معلم:")
+        for r in (_subj(weak_rows) or weak_rows)[:3]:
+            lines.append(f"- «{r['title']}»: تسط {fa_num(r['mastery'])}٪" + (f"؛ خطای غالب {r['dominant_error_fa']}" if r["dominant_error_fa"] else ""))
+        if not weak_rows:
+            lines.append("- وضعیت مباحث عمومی است؛ درباره‌ی سرعت پیشروی برنامه بپرسید.")
+    else:
+        lines.append(
+            f"تسط کلی {fa_num(pm['mastery_pct'])}٪ و پیشرفت برنامه {fa_num(pm['progress_pct'])}٪ است."
+        )
+        if weak_rows:
+            lines.append(
+                f"{fa_num(len(weak_rows))} مبحث نیازمند توجه است که مهم‌ترین آن «{weak_rows[0]['title']}» است."
+            )
+        if strong_rows:
+            lines.append("نقاط قوت: " + "، ".join(r["title"] for r in strong_rows[:3]) + ".")
+        lines.append("برای جزئیات بیشتر بخش «وضعیت یادگیری» را ببینید.")
+
+    answer = " ".join(lines)
+    return {
+        "student_id": student_id,
+        "question": q,
+        "answer": answer,
+        "answer_fa": answer,
+        "intent": intent,
+        "subject": subject_hint,
+        "references": {
+            "weak_topics": (_subj(weak_rows) or weak_rows)[:3],
+            "strong_topics": strong_rows[:3],
+            "exam_avg": exam_avg,
+            "exam_delta": exam_delta,
+            "progress_pct": pm["progress_pct"],
+            "mastery_pct": pm["mastery_pct"],
+        },
+        "note_fa": (
+            "پاسخ فقط از داده‌های واقعی همین فرزند ساخته شده است؛ دستیار درباره‌ی شخصیت یا "
+            "هوش او قضاوت نمی‌کند و به داده‌ی دانش‌آموزان دیگر دسترسی ندارد (سند والدین §15)."
+        ),
+    }
+
+
+SUBJECT_HINTS = {
+    "math": "ریاضی",
+    "physics": "فیزیک",
+    "chemistry": "شیمی",
+    "biology": "زیست",
+    "arabic": "عربی",
+    "english": "انگلیسی",
+    "farsi": "ادبیات",
+}
+
+
+def fa_num(value) -> str:
+    """عدد فارسی‌شده برای متن‌های کاربرپسند."""
+    if value is None:
+        return "—"
+    if isinstance(value, float) and value == int(value):
+        value = int(value)
+    text = str(value)
+    table = str.maketrans("0123456789.", "۰۱۲۳۴۵۶۷۸۹٫")
+    return text.translate(table)
