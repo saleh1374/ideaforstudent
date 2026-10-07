@@ -16,6 +16,7 @@ import { IconMap, IconRefresh, IconShield } from "@/components/ui/icons";
 import { GeoOverviewPanel } from "@/components/geo/overview-panel";
 import { GeoInsightsPanel } from "@/components/geo/insights-panel";
 import { ProvinceRankingTable } from "@/components/geo/province-ranking";
+import { DistrictReportsSection } from "./district-reports-section";
 import type { Insights, Overview, TopicRow } from "@/components/geo/types";
 
 /** حوزهٔ تماس‌گیرنده — GET /geo/me (در صورت نبود، از /auth/me فقط نقش خوانده می‌شود). */
@@ -218,6 +219,9 @@ export default function ProvincePage() {
             <ProvinceRankingTable data={national} highlightProvinceId={provinceId} title={null} />
           </Section>
         )}
+
+        {/* ۴) گزارش‌های ناحیه‌ها + تصمیم استان (§32) — در صورت 403 با پیام جدا نمایش داده می‌شود */}
+        {!loading && role === "province_admin" && <DistrictReportsSection provinceId={provinceId} />}
       </div>
     </AppShell>
   );

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { api, getToken, ErrorOut } from "@/lib/api";
-import { CAUSE_FA, fa } from "@/lib/labels";
+import { CAUSE_FA, CAUSE_SHORT, fa } from "@/lib/labels";
 import { AppShell } from "@/components/ui/shell";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardHeader } from "@/components/ui/card";
@@ -32,6 +32,19 @@ const STATUS_FILTERS: { key: string; label: string }[] = [
   { key: "relapsed", label: "بازگشته" },
 ];
 
+/** کلیدهای شش‌گانهٔ علت — همان SIX_CAUSES سمت سرور (POST /errors/{id}/reflect). */
+const SIX_CAUSES = Object.keys(CAUSE_FA);
+
+/** ردیف دفترچهٔ خطا + فیلدهای توضیحی که سرور برای «اندیشیدن دربارهٔ خطا» می‌فرستد. */
+type ErrorRow = ErrorOut & {
+  cause_fa?: string;
+  predicted_cause?: string | null;
+  declared_cause?: string | null;
+  certainty?: number | null;
+  unclear?: boolean;
+  needs_reflection?: boolean;
+};
+
 type RetestPlan = {
   targets: { topic_id: number; title: string; causes: Record<string, number>; error_ids: number[] }[];
   can_build: boolean;
@@ -39,7 +52,7 @@ type RetestPlan = {
 };
 
 export default function ErrorNotebookPage() {
-  const [errors, setErrors] = useState<ErrorOut[]>([]);
+  const [errors, setErrors] = useState<ErrorRow[]>([]);
   const [byCause, setByCause] = useState<Record<string, number>>({});
   const [causeFilter, setCauseFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -47,6 +60,47 @@ export default function ErrorNotebookPage() {
   const [loading, setLoading] = useState(true);
   const [plan, setPlan] = useState<RetestPlan | null>(null);
   const [building, setBuilding] = useState(false);
+  const [reflectCause, setReflectCause] = useState<Record<number, string>>({});
+  const [reflectingId, setReflectingId] = useState<number | null>(null);
+
+  /** اندیشیدن دربارهٔ خطا (§6.2): POST /student/errors/{id}/reflect با { cause }. */
+  async function reflect(e: ErrorRow) {
+    const cause = reflectCause[e.id];
+    if (!cause) return;
+    setReflectingId(e.id);
+    try {
+      const res = await api<{ ok: boolean; cause: string; cause_fa: string; message_fa: string }>(
+        `/student/errors/${e.id}/reflect`,
+        { method: "POST", json: { cause } }
+      );
+      toast(res.message_fa, "success");
+      setErrors((prev) =>
+        prev.map((x) =>
+          x.id === e.id
+            ? { ...x, cause: res.cause, cause_fa: res.cause_fa, declared_cause: res.cause, needs_reflection: false }
+            : x
+        )
+      );
+      // توزیع علت‌ها را هم به‌روز نگه می‌داریم (عدد فیلترها از سرور تغییر نمی‌کند)
+      setByCause((prev) => {
+        if (e.cause === res.cause) return prev;
+        const next = { ...prev };
+        if (typeof next[e.cause] === "number") next[e.cause] = Math.max(0, next[e.cause] - 1);
+        if (next[e.cause] === 0) delete next[e.cause];
+        next[res.cause] = (next[res.cause] ?? 0) + 1;
+        return next;
+      });
+      setReflectCause((prev) => {
+        const copy = { ...prev };
+        delete copy[e.id];
+        return copy;
+      });
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "خطا در ثبت علت خطا", "error");
+    } finally {
+      setReflectingId(null);
+    }
+  }
 
   async function loadPlan() {
     try {
@@ -74,7 +128,7 @@ export default function ErrorNotebookPage() {
       window.location.href = "/login";
       return;
     }
-    api<{ errors: ErrorOut[]; by_cause: Record<string, number> }>("/student/errors")
+    api<{ errors: ErrorRow[]; by_cause: Record<string, number> }>("/student/errors")
       .then((d) => {
         setErrors(d.errors);
         setByCause(d.by_cause);
@@ -252,6 +306,58 @@ export default function ErrorNotebookPage() {
                       <span className="text-ink-faint">{e.item.options[e.item.correct]}</span>
                     )}
                   </div>
+
+                  {/* ——— اندیشیدن دربارهٔ خطا (§6.2) — فقط برای خطای باز ——— */}
+                  {e.status === "open" && (
+                    <div className="mt-3 rounded-xl border border-line bg-surface-sunken p-3">
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-xs font-bold text-ink">اندیشیدن دربارهٔ خطا</p>
+                        <p className="text-[11px] text-ink-faint">
+                          {e.needs_reflection
+                            ? "علت تشخیص داده نشده؛ خودت علت را اعلام کن تا برنامهٔ ترمیمی دقیق شود."
+                            : "با خودت فکر کن: واقعاً چرا این سؤال غلط شد؟"}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {SIX_CAUSES.map((c) => {
+                          const active = reflectCause[e.id] === c;
+                          return (
+                            <button
+                              key={c}
+                              type="button"
+                              onClick={() => setReflectCause((prev) => ({ ...prev, [e.id]: c }))}
+                              className={`rounded-full px-3 py-1.5 text-[11px] font-semibold transition ${
+                                active
+                                  ? "bg-primary-600 text-white shadow-soft"
+                                  : "bg-slate-100 text-ink-muted hover:bg-primary-50 hover:text-primary-700"
+                              }`}
+                              aria-pressed={active}
+                            >
+                              {CAUSE_SHORT[c] ?? CAUSE_FA[c] ?? c}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-[11px] text-ink-muted">
+                          {reflectCause[e.id]
+                            ? `علت انتخابی: ${CAUSE_FA[reflectCause[e.id]] ?? reflectCause[e.id]}`
+                            : e.declared_cause
+                              ? `علت اعلامی: ${CAUSE_FA[e.declared_cause] ?? e.declared_cause}`
+                              : "یکی از شش علت را انتخاب کن."}
+                        </p>
+                        <Button
+                          size="sm"
+                          variant="soft"
+                          disabled={!reflectCause[e.id]}
+                          loading={reflectingId === e.id}
+                          onClick={() => reflect(e)}
+                        >
+                          ثبت علت خطا
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

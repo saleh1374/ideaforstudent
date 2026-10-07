@@ -19,7 +19,13 @@ import { toast } from "@/components/ui/toast";
 import {
   IconAlert,
   IconChart,
+  IconCheckCircle,
+  IconClock,
+  IconExam,
+  IconGraduation,
+  IconHome,
   IconLayers,
+  IconSparkles,
   IconTarget,
   IconUsers,
 } from "@/components/ui/icons";
@@ -29,6 +35,7 @@ import { ExamAnalysisSection } from "./exam-analysis-section";
 import { CopilotSection } from "./copilot-section";
 import { TeacherScheduleSection } from "./schedule-section";
 import { TeacherHomeSection } from "./home-section";
+import { StudentsSection } from "./students-section";
 
 type ClassInfo = {
   class_id: number;
@@ -75,7 +82,28 @@ type Group = {
   }[];
 };
 
-const VIEW_KEYS = ["home", "class", "assessment", "builder", "analysis", "copilot", "schedule"] as const;
+const VIEW_KEYS = [
+  "home",
+  "class",
+  "students",
+  "assessment",
+  "builder",
+  "analysis",
+  "copilot",
+  "schedule",
+] as const;
+
+/** راهبری بخش‌های پنل — برچسب با آیکون موجود از مجموعهٔ icons */
+const VIEW_TABS: { key: (typeof VIEW_KEYS)[number]; label: string; icon: typeof IconHome }[] = [
+  { key: "home", label: "خانه", icon: IconHome },
+  { key: "class", label: "هوش کلاس", icon: IconUsers },
+  { key: "students", label: "دانش‌آموزان کلاس", icon: IconGraduation },
+  { key: "assessment", label: "ارزیابی صلاحیت", icon: IconCheckCircle },
+  { key: "builder", label: "سازنده آزمون", icon: IconExam },
+  { key: "analysis", label: "تحلیل آزمون", icon: IconChart },
+  { key: "copilot", label: "دستیار کلاس", icon: IconSparkles },
+  { key: "schedule", label: "برنامه من", icon: IconClock },
+];
 
 export default function TeacherPage() {
   return (
@@ -250,6 +278,21 @@ function TeacherInner() {
           badge={classes.length > 0 ? <Badge tone="primary" dot>{fa(classes.length)} کلاس</Badge> : undefined}
         />
 
+        {/* راهبری بخش‌های پنل (شامل تب «دانش‌آموزان کلاس») */}
+        <Tabs
+          items={VIEW_TABS.map((t) => ({
+            key: t.key,
+            label: (
+              <span className="flex items-center gap-1.5">
+                <t.icon size={14} />
+                {t.label}
+              </span>
+            ),
+          }))}
+          value={view}
+          onChange={(k) => setView(k)}
+        />
+
         {view === "home" && <TeacherHomeSection onGoClass={(cid) => { setActiveClass(cid); setView("class"); loadClass(cid); }} onGoBuilder={() => setView("builder")} />}
 
         {view === "schedule" && <TeacherScheduleSection />}
@@ -261,6 +304,8 @@ function TeacherInner() {
         {view === "analysis" && <ExamAnalysisSection />}
 
         {view === "copilot" && <CopilotSection classId={activeClass} />}
+
+        {view === "students" && <StudentsSection classes={classes} classesLoading={loading} />}
 
         {view === "class" && msg && classes.length === 0 && <Alert variant="danger" title="خطا">{msg}</Alert>}
 

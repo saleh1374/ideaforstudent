@@ -1040,10 +1040,9 @@ async def subject_status(db: AsyncSession, student_id: int) -> dict:
                 continue
             st_key = status_of(r.effective_mastery, r.evidence_count)
             tr, dl = _history_trend(r.history)
-            weak_causes = sorted(
-                cause_by_topic.get(r.topic_id, {}), key=cause_by_topic[r.topic_id].get, reverse=True
-            )
-            similar = sum(cause_by_topic.get(r.topic_id, {}).values())
+            causes_for_topic = cause_by_topic.get(r.topic_id, {})
+            weak_causes = sorted(causes_for_topic, key=causes_for_topic.get, reverse=True)
+            similar = sum(causes_for_topic.values())
             topic_rows.append(
                 {
                     "topic_id": r.topic_id,

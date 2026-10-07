@@ -32,6 +32,8 @@ import { QualificationsSection } from "./qualifications-section";
 import { AdmissionsSection } from "./admissions-section";
 import { ExamsSection } from "./exams-section";
 import { InterventionsSection } from "./interventions-section";
+import { AnalyticsSection } from "./analytics-section";
+import { ReportsSection } from "./reports-section";
 
 type Overview = {
   district: { id: number; name: string | null };
@@ -59,7 +61,9 @@ type Tab =
   | "qualifications"
   | "admissions"
   | "exams"
-  | "interventions";
+  | "interventions"
+  | "analytics"
+  | "reports";
 
 const TAB_KEYS: readonly string[] = [
   "overview",
@@ -70,6 +74,8 @@ const TAB_KEYS: readonly string[] = [
   "exams",
   "interventions",
   "admissions",
+  "analytics",
+  "reports",
 ];
 
 const STATUS_FA: Record<string, string> = {
@@ -193,6 +199,8 @@ function DistrictInner() {
             { key: "exams", label: "آزمون‌های رسمی" },
             { key: "interventions", label: "مداخله و مأموریت‌ها" },
             { key: "admissions", label: "ثبت‌نام دانش‌آموزان" },
+            { key: "analytics", label: "تحلیل و سلامت ناحیه" },
+            { key: "reports", label: "گزارش‌ها و انتقالات" },
           ]}
           value={tab}
           onChange={(k) => setTab(k)}
@@ -296,6 +304,8 @@ function DistrictInner() {
         {tab === "exams" && <ExamsSection />}
         {tab === "interventions" && <InterventionsSection />}
         {tab === "admissions" && <AdmissionsSection onChanged={loadOverview} />}
+        {tab === "analytics" && <AnalyticsSection />}
+        {tab === "reports" && <ReportsSection />}
       </div>
   );
 }

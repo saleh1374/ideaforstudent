@@ -478,7 +478,11 @@ async def seed(db: AsyncSession) -> None:
             occurred_at=now_utc - timedelta(days=days_ago),
         )
 
-    # student1: بدون شواهد اضافه — از آزمون دوره نمره می‌گیرد (تسلط پایین → مداخله)
+    # student1: شواهدِ تمرینِ همه‌غلط (تسلط ۰٪ → «بحرانی») تا پنل والدینِ دمو
+    # درسی برای نمایش داشته باشد؛ بدون تلاشِ آزمون تا گزارش نمرات از صفر شروع شود
+    for d in (10, 6, 2):
+        db.add(practice(student.id, t_set.id, 0.0, d))
+        db.add(practice(student.id, t_rel.id, 0.0, d))
 
     # student2: همه درست ولی آخرین شاهد ۲۰ روز قبل → افت ماندگاری
     for d in (40, 30, 20):

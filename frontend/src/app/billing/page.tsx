@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { ApiError, api, getToken } from "@/lib/api";
 import { SUBJECT_FA, fa, subjectFa } from "@/lib/labels";
 import { AppShell } from "@/components/ui/shell";
@@ -55,13 +55,16 @@ type Payment = {
   id?: number;
   invoice_no?: string | null;
   amount?: number;
+  method?: string | null;
   method_fa?: string | null;
   status?: string;
   status_fa?: string | null;
+  payer_name?: string | null;
   tutor_name?: string | null;
   student_name?: string | null;
   description?: string | null;
   created_at?: string | null;
+  paid_at?: string | null;
   session_pack_id?: number | null;
 };
 
@@ -75,6 +78,24 @@ type Refund = {
   status_fa?: string | null;
   created_at?: string | null;
   decision_note?: string | null;
+};
+
+type PaymentDetail = {
+  payment: Payment | null;
+  refunds: Refund[];
+  pack: Pack | null;
+  mode_note_fa?: string | null;
+};
+
+type UsePackResult = {
+  ok?: boolean;
+  reason?: string;
+  pack_id?: number;
+  used?: number;
+  purchased?: number;
+  remaining?: number;
+  status?: string;
+  status_fa?: string | null;
 };
 
 type Earnings = {
@@ -193,6 +214,16 @@ function faDate(iso?: string | null): string {
 }
 
 const money = (v?: number | null): string => (typeof v === "number" ? `${fa(v)} تومان` : "—");
+
+/** یک جفت «برچسب/مقدار» در مودال جزئیات فاکتور */
+function DetailItem({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="rounded-xl border border-line bg-surface-sunken px-3.5 py-2.5">
+      <p className="text-[11px] font-semibold text-ink-faint">{label}</p>
+      <div className="mt-0.5 break-words text-xs font-semibold text-ink">{children}</div>
+    </div>
+  );
+}
 
 /* ---------------- صفحه ---------------- */
 
@@ -400,7 +431,88 @@ export default function BillingPage() {
     }
   }
 
+  /* ---------------- مصرف جلسه (معلم) — POST /billing/packs/{pack_id}/use ---------------- */
+
+  const [useTarget, setUseTarget] = useState<Pack | null>(null);
+  const [useBusy, setUseBusy] = useState(false);
+  const [useError, setUseError] = useState("");
+
+  function openUse(p: Pack) {
+    setUseError("");
+    setUseTarget(p);
+  }
+
+  async function submitUse() {
+    if (!useTarget?.id) return;
+    setUseBusy(true);
+    setUseError("");
+    try {
+      // سرور بدنه‌ای نمی‌خواهد؛ مالکیت بسته و سقف جلسات سمت سرور چک می‌شود
+      const res = await api<UsePackResult>(`/billing/packs/${useTarget.id}/use`, { method: "POST" });
+      if (res?.ok === false) {
+        setUseError(res.reason ?? "ثبت مصرف جلسه انجام نشد؛ دوباره تلاش کنید.");
+        return;
+      }
+      toast(
+        `یک جلسه ثبت شد — ${fa(res?.used ?? 0)} از ${fa(res?.purchased ?? 0)} (${fa(res?.remaining ?? 0)} باقی‌مانده)`,
+        "success"
+      );
+      setUseTarget(null);
+      await loadFor(role); // تازه‌سازی شاخص‌ها و بسته‌ها
+    } catch (e) {
+      if (e instanceof ApiError) setUseError(e.detail ?? e.message);
+      else setUseError(e instanceof Error ? e.message : "خطا در ثبت مصرف جلسه");
+    } finally {
+      setUseBusy(false);
+    }
+  }
+
+  /* ---------------- جزئیات پرداخت/فاکتور — GET /billing/payments/{payment_id} ---------------- */
+
+  const [detailId, setDetailId] = useState<number | null>(null);
+  const [detail, setDetail] = useState<PaymentDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
+
+  async function openPayment(p: Payment) {
+    if (!p.id) return;
+    setDetailId(p.id);
+    setDetail(null);
+    setDetailError("");
+    setDetailLoading(true);
+    try {
+      setDetail(await api<PaymentDetail>(`/billing/payments/${p.id}`));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 403) {
+        // یک 403 فقط همین مودال را می‌بندد؛ جدول سر جایش می‌ماند
+        toast(e.detail ?? "به این فاکتور دسترسی ندارید", "error");
+        setDetailId(null);
+      } else {
+        setDetailError(e instanceof Error ? e.message : "خطا در دریافت جزئیات پرداخت");
+      }
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
   /* ---------------- ستون‌های جدول ---------------- */
+
+  /* «مصرف جلسه» فقط برای معلم معنا دارد — سرور برای نقش دیگر 403 می‌دهد */
+  const packActionCols: Column<Pack>[] = isTeacher
+    ? [
+        {
+          key: "actions",
+          header: "",
+          align: "end",
+          render: (p) =>
+            p?.id && p.status === "active" && num(p?.remaining) > 0 ? (
+              <Button size="sm" variant="soft" onClick={() => openUse(p)}>
+                مصرف جلسه
+              </Button>
+            ) : null,
+        },
+      ]
+    : [];
 
   const packCols: Column<Pack>[] = [
     {
@@ -457,6 +569,7 @@ export default function BillingPage() {
         </Badge>
       ),
     },
+    ...packActionCols,
   ];
 
   const paymentCols: Column<Payment>[] = [
@@ -513,7 +626,14 @@ export default function BillingPage() {
           hasOpenRefund(p.id) ? (
             <span className="text-[11px] text-ink-faint">بازپرداخت در انتظار</span>
           ) : (
-            <Button size="sm" variant="ghost" onClick={() => openRefund(p)}>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={(e) => {
+                e.stopPropagation(); // فقط بازپرداخت — مودال جزئیات باز نشود
+                openRefund(p);
+              }}
+            >
               درخواست بازپرداخت
             </Button>
           )
@@ -754,7 +874,7 @@ export default function BillingPage() {
             {activeTab === "payments" && (
               <Section
                 title="پرداخت‌ها و فاکتورها"
-                subtitle="تاریخچه کامل تراکنش‌ها — وضعیت: پرداخت‌شده / در انتظار / ناموفق"
+                subtitle="تاریخچه کامل تراکنش‌ها — برای جزئیات فاکتور، بازپرداخت‌ها و بسته مرتبط روی ردیف کلیک کنید"
                 action={
                   <Button size="sm" icon={<IconPlus size={14} />} onClick={openPay}>
                     ثبت پرداخت
@@ -765,6 +885,7 @@ export default function BillingPage() {
                   columns={paymentCols}
                   rows={paymentRows}
                   keyOf={(p, i) => p?.id ?? i}
+                  onRowClick={(p) => void openPayment(p)}
                   loading={loading && paymentRows.length === 0}
                   empty={
                     <EmptyState
@@ -967,6 +1088,152 @@ export default function BillingPage() {
             />
           </Field>
         </div>
+      </Modal>
+
+      {/* ---------------- مودال تأیید مصرف جلسه (معلم) ---------------- */}
+      <Modal
+        open={useTarget !== null}
+        onClose={() => setUseTarget(null)}
+        title="تأیید مصرف جلسه"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setUseTarget(null)} disabled={useBusy}>
+              انصراف
+            </Button>
+            <Button loading={useBusy} onClick={() => void submitUse()}>
+              ثبت مصرف یک جلسه
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <div className="space-y-1 rounded-xl border border-line bg-surface-sunken px-4 py-3 text-xs text-ink-muted">
+            <p>
+              معلم: <span className="font-semibold text-ink">{useTarget?.tutor_name ?? "—"}</span> — دانش‌آموز:{" "}
+              <span className="font-semibold text-ink">{useTarget?.student_name ?? "—"}</span>
+            </p>
+            <p>
+              درس: <span className="font-semibold text-ink">{subjectFa(useTarget?.subject)}</span> — جلسات:{" "}
+              <span className="num font-semibold text-ink">
+                {fa(useTarget?.used ?? 0)} از {fa(useTarget?.purchased ?? 0)} — {fa(useTarget?.remaining ?? 0)} باقی‌مانده
+              </span>
+            </p>
+          </div>
+
+          <Alert variant="warning" title="شمارش بسته به‌روز می‌شود">
+            یک جلسه از این بسته ثبت می‌شود؛ سرور از سقف بسته فراتر نمی‌رود و اگر همه جلسات تمام شده باشد، وضعیت بسته
+            «تمام‌شده» می‌شود.
+          </Alert>
+
+          {useError && <Alert variant="danger">{useError}</Alert>}
+        </div>
+      </Modal>
+
+      {/* ---------------- مودال جزئیات پرداخت — GET /billing/payments/{id} ---------------- */}
+      <Modal
+        open={detailId !== null}
+        onClose={() => setDetailId(null)}
+        title={detail?.payment?.invoice_no ? `جزئیات فاکتور ${detail.payment.invoice_no}` : "جزئیات پرداخت"}
+        size="lg"
+        footer={
+          <Button variant="ghost" onClick={() => setDetailId(null)}>
+            بستن
+          </Button>
+        }
+      >
+        {detailLoading && <SkeletonCard />}
+
+        {!detailLoading && detailError && (
+          <Alert variant="danger" title="خطا در دریافت جزئیات">
+            {detailError}
+          </Alert>
+        )}
+
+        {!detailLoading && !detailError && detail && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <DetailItem label="شماره فاکتور">
+                <span className="num">{detail.payment?.invoice_no ?? "—"}</span>
+              </DetailItem>
+              <DetailItem label="وضعیت">
+                <Badge tone={PAY_TONE[detail.payment?.status ?? ""] ?? "neutral"} dot>
+                  {detail.payment?.status_fa ?? PAY_FA[detail.payment?.status ?? ""] ?? "—"}
+                </Badge>
+              </DetailItem>
+              <DetailItem label="مبلغ">
+                <span className="num">{money(detail.payment?.amount)}</span>
+              </DetailItem>
+              <DetailItem label="روش پرداخت">{detail.payment?.method_fa ?? "خارج از سیستم"}</DetailItem>
+              <DetailItem label="پرداخت‌کننده">{detail.payment?.payer_name ?? "—"}</DetailItem>
+              <DetailItem label="دانش‌آموز">{detail.payment?.student_name ?? "—"}</DetailItem>
+              <DetailItem label="معلم خصوصی">{detail.payment?.tutor_name ?? "—"}</DetailItem>
+              <DetailItem label="تاریخ ثبت">
+                <span className="num">{faDate(detail.payment?.created_at)}</span>
+              </DetailItem>
+              <DetailItem label="تاریخ پرداخت">
+                <span className="num">{faDate(detail.payment?.paid_at)}</span>
+              </DetailItem>
+              <DetailItem label="بسته جلسات مرتبط">
+                <span className="num">{detail.payment?.session_pack_id ? `#${fa(detail.payment.session_pack_id)}` : "—"}</span>
+              </DetailItem>
+            </div>
+
+            {detail.payment?.description && (
+              <div className="rounded-xl border border-line bg-surface px-4 py-3">
+                <p className="text-[11px] font-semibold text-ink-faint">شرح تراکنش</p>
+                <p className="mt-0.5 text-xs text-ink">{detail.payment.description}</p>
+              </div>
+            )}
+
+            {/* وضعیت بازپرداخت‌های همین فاکتور */}
+            <div className="rounded-2xl border border-line bg-surface p-4">
+              <p className="mb-2 text-xs font-bold text-ink">بازپرداخت‌ها</p>
+              {(detail.refunds ?? []).length === 0 ? (
+                <p className="text-[11px] text-ink-faint">بازپرداختی برای این فاکتور ثبت نشده است.</p>
+              ) : (
+                <ul className="space-y-2">
+                  {(detail.refunds ?? []).map((r, i) => (
+                    <li
+                      key={r.id ?? i}
+                      className="rounded-xl border border-line bg-surface-sunken px-3.5 py-2.5 text-xs text-ink-muted"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <Badge tone={REFUND_TONE[r.status ?? ""] ?? "neutral"} dot>
+                          {r.status_fa ?? REFUND_FA[r.status ?? ""] ?? "—"}
+                        </Badge>
+                        <span className="num font-semibold text-ink">{money(r.amount)}</span>
+                      </div>
+                      <p className="mt-1.5">{r.reason ?? "—"}</p>
+                      <p className="mt-1 text-[11px] text-ink-faint">
+                        درخواست: <span className="num">{faDate(r.created_at)}</span>
+                        {r.decision_note ? ` — ${r.decision_note}` : ""}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {/* بسته جلسات این پرداخت */}
+            {detail.pack && (
+              <div className="rounded-2xl border border-line bg-surface p-4">
+                <p className="mb-2 text-xs font-bold text-ink">بسته جلسات مرتبط</p>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-ink-muted">
+                  <span>{subjectFa(detail.pack.subject)}</span>
+                  <span className="num">
+                    {fa(detail.pack.used ?? 0)} از {fa(detail.pack.purchased ?? 0)} جلسه
+                  </span>
+                  <span className="num">{money(detail.pack.price_per_session)} هر جلسه</span>
+                  <Badge tone={PACK_TONE[detail.pack.status ?? ""] ?? "neutral"} dot>
+                    {detail.pack.status_fa ?? PACK_FA[detail.pack.status ?? ""] ?? "—"}
+                  </Badge>
+                </div>
+              </div>
+            )}
+
+            {detail.mode_note_fa && <Alert variant="info">{detail.mode_note_fa}</Alert>}
+          </div>
+        )}
       </Modal>
     </AppShell>
   );

@@ -10,6 +10,9 @@ export const HOME: Record<string, string> = {
   province_admin: "/province",
   ministry: "/geo",
   parent: "/parent",
+  // معلم خصوصیِ بازار: خانهٔ خودش است (نه /boards که برای نقش ناشناس است)
+  tutor: "/tutor",
+  platform_admin: "/district",
 };
 
 /** صفحهٔ خانهٔ نقش؛ برای نقش‌های ناشناس «بردهای تحلیلی» (هرگز /admin). */

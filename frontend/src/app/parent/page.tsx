@@ -19,10 +19,11 @@ import { ExamResultsSection } from "./exam-results-section";
 import { PlanSection } from "./plan-section";
 import { AlertsSection } from "./alerts-section";
 import { WeeklyReportSection } from "./weekly-report-section";
+import { LinksSection } from "./links-section";
 
 type Child = { id: number; full_name: string; grade: string | null; class_id: number | null };
 
-const SECTION_KEYS = ["overview", "exams", "plan", "alerts", "weekly"] as const;
+const SECTION_KEYS = ["overview", "exams", "plan", "alerts", "weekly", "links"] as const;
 type SectionKey = (typeof SECTION_KEYS)[number];
 
 type Overview = {
@@ -124,6 +125,7 @@ export default function ParentPage() {
               { key: "plan", label: "برنامه و تکالیف" },
               { key: "alerts", label: "هشدارها" },
               { key: "weekly", label: "گزارش هفتگی" },
+              { key: "links", label: "فرزندان و دسترسی‌ها" },
             ]}
             value={section}
             onChange={(k) => setSection(k as SectionKey)}
@@ -134,6 +136,7 @@ export default function ParentPage() {
         {selected !== null && section === "plan" && <PlanSection childId={selected} />}
         {selected !== null && section === "alerts" && <AlertsSection childId={selected} />}
         {selected !== null && section === "weekly" && <WeeklyReportSection childId={selected} />}
+        {selected !== null && section === "links" && <LinksSection childId={selected} />}
 
         {section === "overview" && !ov && selected !== null && (
           <div className="space-y-5">

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { api, getToken, BookNode } from "@/lib/api";
 import { STATUS_FA, fa, subjectFa } from "@/lib/labels";
 import { AppShell } from "@/components/ui/shell";
@@ -14,7 +15,7 @@ import { EmptyState } from "@/components/ui/empty";
 import { ProgressBar } from "@/components/ui/progress";
 import { SearchInput } from "@/components/ui/forms";
 import { SkeletonCard } from "@/components/ui/skeleton";
-import { IconBook, IconCheckCircle, IconChevronDown, IconHome, IconSearch, IconTarget } from "@/components/ui/icons";
+import { IconArrowLeft, IconBook, IconCheckCircle, IconChevronDown, IconHome, IconSearch, IconTarget } from "@/components/ui/icons";
 
 export default function BooksPage() {
   const [books, setBooks] = useState<BookNode[]>([]);
@@ -155,9 +156,10 @@ export default function BooksPage() {
                               </div>
                               <div className="space-y-1.5">
                                 {ch.topics.map((t) => (
-                                  <div
+                                  <Link
                                     key={t.id}
-                                    className="flex items-center justify-between gap-3 rounded-xl bg-surface px-3.5 py-2.5 shadow-soft"
+                                    href={`/student/topics/${t.id}`}
+                                    className="group flex items-center justify-between gap-3 rounded-xl bg-surface px-3.5 py-2.5 shadow-soft transition hover:border-primary-200 hover:bg-primary-50/40 hover:shadow-card"
                                   >
                                     <div className="flex min-w-0 flex-1 items-center gap-3">
                                       <span className="truncate text-xs font-semibold text-ink">{t.title}</span>
@@ -170,8 +172,9 @@ export default function BooksPage() {
                                         {t.effective_mastery !== null ? `${fa(t.effective_mastery)}٪` : "—"}
                                       </span>
                                       <Badge tone={statusTone(t.status)}>{STATUS_FA[t.status] ?? t.status}</Badge>
+                                      <IconArrowLeft size={14} className="shrink-0 text-ink-faint transition group-hover:text-primary-600" />
                                     </div>
-                                  </div>
+                                  </Link>
                                 ))}
                                 {ch.topics.length === 0 && (
                                   <p className="rounded-xl border border-dashed border-line px-3.5 py-3 text-center text-[11px] text-ink-faint">

@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, getToken, ExamItemOut } from "@/lib/api";
 import { fa } from "@/lib/labels";
 import { AppShell } from "@/components/ui/shell";
@@ -18,17 +18,63 @@ import { IconAlert, IconCheckCircle, IconExam, IconSend, IconTarget } from "@/co
 
 type Phase = "idle" | "starting" | "running" | "submitting" | "done";
 
+/** وضعیت نشانگر «ذخیرهٔ خودکار» در نوار پیشرفت چسبان. */
+type SaveState = "idle" | "saving" | "saved" | "error";
+
+/** پاسخ یک سؤال در حین آزمون — «marked» برای علامت «برای بازبینی» (§5.6). */
+type AnswerDraft = {
+  selected: string;
+  confidence: number;
+  flagged_guess: boolean;
+  time_spent_ms: number;
+  marked?: boolean;
+};
+
+/** خروجی هر سؤال در POST /exams/{id}/start — بستهٔ ذخیرهٔ خودکارِ قبلی (draft). */
+type ExamItemDraft = ExamItemOut & {
+  draft: {
+    selected: string | null;
+    confidence: number | null;
+    time_spent_ms: number;
+    flagged_guess: boolean;
+    marked: boolean;
+  } | null;
+};
+
+type StartOut = {
+  attempt_id: number;
+  resumed: boolean;
+  saved_count: number;
+  items: ExamItemDraft[];
+};
+
 export default function ExamPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const examId = Number(params.id);
 
   const [phase, setPhase] = useState<Phase>("idle");
-  const [items, setItems] = useState<ExamItemOut[]>([]);
-  const [answers, setAnswers] = useState<Record<number, { selected: string; confidence: number; flagged_guess: boolean; time_spent_ms: number }>>({});
+  const [items, setItems] = useState<ExamItemDraft[]>([]);
+  const [answers, setAnswers] = useState<Record<number, AnswerDraft>>({});
   const [startedAt, setStartedAt] = useState<number>(0);
   const [result, setResult] = useState<{ raw_score: number; percent: number } | null>(null);
   const [error, setError] = useState("");
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+
+  // مراجعِ تازه برای رویدادهای قبل از ترک صفحه (visibilitychange / beforeunload)
+  const answersRef = useRef(answers);
+  const itemsRef = useRef(items);
+  const phaseRef = useRef<Phase>(phase);
+
+  useEffect(() => {
+    answersRef.current = answers;
+  }, [answers]);
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
 
   useEffect(() => {
     if (!getToken()) {
@@ -40,8 +86,26 @@ export default function ExamPage() {
     setError("");
     setPhase("starting");
     try {
-      const d = await api<{ attempt_id: number; items: ExamItemOut[] }>(`/student/exams/${examId}/start`, { method: "POST" });
+      const d = await api<StartOut>(`/student/exams/${examId}/start`, { method: "POST" });
       setItems(d.items);
+
+      // بازیابی ذخیرهٔ خودکارِ تلاش نیمه‌تمام (§5.6) — پاسخ‌های ذخیره‌شده برمی‌گردند
+      const restored: Record<number, AnswerDraft> = {};
+      for (const it of d.items) {
+        if (!it.draft) continue;
+        restored[it.exam_item_id] = {
+          selected: it.draft.selected ?? "",
+          confidence: it.draft.confidence ?? 3,
+          flagged_guess: it.draft.flagged_guess,
+          time_spent_ms: it.draft.time_spent_ms ?? 0,
+          marked: it.draft.marked,
+        };
+      }
+      setAnswers(restored);
+      setSaveState(Object.keys(restored).length > 0 ? "saved" : "idle");
+      if (d.resumed && d.saved_count > 0) {
+        toast(`ادامهٔ تلاش قبلی — ${fa(d.saved_count)} پاسخ ذخیره‌شده بازیابی شد`, "info");
+      }
       setStartedAt(Date.now());
       setPhase("running");
     } catch (e) {
@@ -50,9 +114,68 @@ export default function ExamPage() {
     }
   }
 
-  function setAnswer(eid: number, patch: Partial<{ selected: string; confidence: number; flagged_guess: boolean }>) {
+  /** POST /student/exams/{id}/save — بدنه: { answers: [DraftIn] } (بدون آن ذخیره انجام نمی‌شود). */
+  async function saveDraft(keepalive = false) {
+    if (phaseRef.current !== "running") return;
+    const current = answersRef.current;
+    const touched = itemsRef.current.filter((it) => current[it.exam_item_id]);
+    if (touched.length === 0) return;
+    setSaveState("saving");
+    try {
+      await api(`/student/exams/${examId}/save`, {
+        method: "POST",
+        // هنگام ترک صفحه فقط fetch با keepalive می‌ماند؛ sendBeacon چون هدر
+        // Authorization نمی‌فرستد و سرور با 401 رد می‌کند، استفاده نمی‌شود.
+        keepalive,
+        json: {
+          answers: touched.map((it) => {
+            const a = current[it.exam_item_id];
+            return {
+              exam_item_id: it.exam_item_id,
+              selected: a.selected || null,
+              confidence: a.confidence,
+              time_spent_ms: a.time_spent_ms,
+              flagged_guess: a.flagged_guess,
+              marked: a.marked ?? false,
+            };
+          }),
+        },
+      });
+      setSaveState("saved");
+    } catch {
+      setSaveState("error");
+    }
+  }
+
+  /* ذخیرهٔ خودکار با تأخیر ~۴ ثانیه پس از هر تغییر */
+  useEffect(() => {
+    if (phase !== "running" || Object.keys(answers).length === 0) return;
+    const timer = window.setTimeout(() => void saveDraft(), 4000);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [answers, phase]);
+
+  /* بهترین تلاش برای ذخیرهٔ پاسخ‌ها هنگام مخفی شدن/بستن برگه */
+  useEffect(() => {
+    const flush = () => {
+      if (phaseRef.current !== "running") return;
+      void saveDraft(true);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("beforeunload", flush);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function setAnswer(eid: number, patch: Partial<Pick<AnswerDraft, "selected" | "confidence" | "flagged_guess" | "marked">>) {
     setAnswers((prev) => {
-      const current = prev[eid] ?? { selected: "", confidence: 3, flagged_guess: false, time_spent_ms: 0 };
+      const current = prev[eid] ?? { selected: "", confidence: 3, flagged_guess: false, time_spent_ms: 0, marked: false };
       return { ...prev, [eid]: { ...current, ...patch } };
     });
   }
@@ -62,11 +185,15 @@ export default function ExamPage() {
     setPhase("submitting");
     try {
       const perItemMs = Math.floor((Date.now() - startedAt) / Math.max(items.length, 1));
-      const payload = items.map((it) => ({
-        exam_item_id: it.exam_item_id,
-        ...(answers[it.exam_item_id] ?? {}),
-        time_spent_ms: perItemMs,
-      }));
+      const payload = items.map((it) => {
+        const a: Partial<AnswerDraft> = answers[it.exam_item_id] ?? {};
+        const { marked: _marked, ...rest } = a;
+        return {
+          exam_item_id: it.exam_item_id,
+          ...rest,
+          time_spent_ms: perItemMs,
+        };
+      });
       const res = await api<{ raw_score: number; percent: number }>(`/student/exams/${examId}/submit`, {
         method: "POST",
         json: { answers: payload },
@@ -160,6 +287,10 @@ export default function ExamPage() {
                   <IconCheckCircle size={15} className="mt-0.5 shrink-0 text-success-600" />
                   بعد از ثبت، خطاها خودکار وارد دفترچه خطا می‌شود.
                 </li>
+                <li className="flex items-start gap-2">
+                  <IconCheckCircle size={15} className="mt-0.5 shrink-0 text-primary-500" />
+                  پاسخ‌ها به‌صورت خودکار ذخیره می‌شوند؛ اگر نیمه‌کاره رها کنی، از همان‌جا ادامه می‌دهی.
+                </li>
               </ul>
               {error && <Alert variant="danger">{error}</Alert>}
               <Button size="lg" className="w-full" onClick={start} icon={<IconSend size={16} />}>
@@ -208,6 +339,18 @@ export default function ExamPage() {
             label="پیشرفت آزمون"
             showValue
           />
+          <p
+            className={`mt-2 flex items-center gap-1.5 text-[11px] font-semibold ${
+              saveState === "error" ? "text-danger-600" : saveState === "saved" ? "text-success-600" : "text-ink-muted"
+            }`}
+            role="status"
+          >
+            {saveState === "saving" && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary-500" />}
+            {saveState === "saving" && "در حال ذخیره…"}
+            {saveState === "saved" && "ذخیره خودکار ✓"}
+            {saveState === "error" && "ذخیره خودکار ناموفق؛ اتصال اینترنت را بررسی کن"}
+            {saveState === "idle" && "ذخیره خودکار پاسخ‌ها فعال است"}
+          </p>
         </div>
 
         <div className="space-y-4">

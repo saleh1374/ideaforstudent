@@ -9,9 +9,12 @@ import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardHeader, Section } from "@/components/ui/card";
 import { StatCard } from "@/components/ui/stat";
 import { Alert } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty";
-import { SkeletonCard, SkeletonStats } from "@/components/ui/skeleton";
+import { ProgressBar } from "@/components/ui/progress";
+import { SkeletonCard, SkeletonStats, SkeletonText } from "@/components/ui/skeleton";
+import { toast } from "@/components/ui/toast";
 import { DonutChart, RadialProgress } from "@/components/ui/charts";
 import {
   IconAlert,
@@ -46,9 +49,81 @@ const QUICK_LINKS = [
   { href: "/boards", label: "بردها", icon: IconChart },
 ];
 
+/** خروجی GET /student/plan/status — کنترل بار و توقف موقت برنامه (§4.3). */
+type PlanStatus = {
+  paused: boolean;
+  pause: { id?: number; start_date: string; end_date: string; reason_fa?: string | null; days_left: number } | null;
+  message_fa: string | null;
+  load: {
+    date: string;
+    cap_minutes: number;
+    used_minutes: number;
+    remaining_minutes: number;
+    paused: boolean;
+    cap_message_fa?: string | null;
+  };
+  note_fa?: string;
+};
+
+/** خروجی GET /student/xp — فقط عدد واقعی امتیاز/زنجیره (§8). */
+type XpSummary = {
+  total_xp: number;
+  today_xp: number;
+  streak: number;
+  active_days: number;
+};
+
 export default function StudentHome() {
   const [data, setData] = useState<HomeData | null>(null);
   const [error, setError] = useState("");
+
+  const [plan, setPlan] = useState<PlanStatus | null>(null);
+  const [planError, setPlanError] = useState("");
+  const [planLoading, setPlanLoading] = useState(true);
+  const [toggling, setToggling] = useState(false);
+
+  const [xp, setXp] = useState<XpSummary | null>(null);
+  const [xpError, setXpError] = useState("");
+
+  async function loadPlan(silent = false) {
+    if (!silent) setPlanLoading(true);
+    try {
+      setPlan(await api<PlanStatus>("/student/plan/status"));
+      setPlanError("");
+    } catch (e) {
+      setPlanError(e instanceof Error ? e.message : "خطا");
+    } finally {
+      if (!silent) setPlanLoading(false);
+    }
+  }
+
+  function loadXp() {
+    api<XpSummary>("/student/xp")
+      .then((d) => {
+        setXp(d);
+        setXpError("");
+      })
+      .catch((e) => setXpError(e.message));
+  }
+
+  /** توقف/ادامهٔ برنامه با رابط خوش‌بینانه + همگام‌سازی نهایی با سرور. */
+  async function togglePlan() {
+    if (!plan || toggling) return;
+    const pausing = !plan.paused;
+    setPlan({ ...plan, paused: pausing, pause: pausing ? plan.pause : null }); // خوش‌بینانه
+    setToggling(true);
+    try {
+      const res = pausing
+        ? await api<{ message_fa: string }>("/student/plan/pause", { method: "POST", json: {} })
+        : await api<{ message_fa: string }>("/student/plan/resume", { method: "POST" });
+      toast(res.message_fa, "success");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "خطا در تغییر وضعیت برنامه", "error");
+    } finally {
+      setToggling(false);
+      await loadPlan(true);
+    }
+  }
 
   useEffect(() => {
     if (!getToken()) {
@@ -56,6 +131,9 @@ export default function StudentHome() {
       return;
     }
     api<HomeData>("/student/home").then(setData).catch((e) => setError(e.message));
+    loadPlan();
+    loadXp();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -143,6 +221,81 @@ export default function StudentHome() {
                   : "«تسط بالا، عقبی در برنامه»؛ سرعت درس جدید را بررسی کن."}
               </Alert>
             )}
+
+            {/* ——— کنترل برنامه (§4.3) + امتیاز یادگیری (§8) ——— */}
+            <section className="grid gap-5 lg:grid-cols-3">
+              <Card className="lg:col-span-2">
+                <CardHeader
+                  title="کنترل برنامه"
+                  subtitle="توقف موقت و سقف بار روزانه — «برنامهٔ اصلی تغییر نمی‌کند»"
+                  icon={<IconClock size={17} />}
+                  action={
+                    plan && !planError ? (
+                      <Button size="sm" variant={plan.paused ? "success" : "ghost"} loading={toggling} onClick={togglePlan}>
+                        {plan.paused ? "ادامه برنامه" : "توقف موقت"}
+                      </Button>
+                    ) : undefined
+                  }
+                />
+
+                {planLoading && !plan && <SkeletonText lines={3} />}
+
+                {!planLoading && planError && (
+                  <div className="space-y-3">
+                    <Alert variant="warning" title="خطا در دریافت وضعیت برنامه">
+                      {planError}
+                    </Alert>
+                    <Button size="sm" variant="soft" onClick={() => loadPlan()}>
+                      تلاش دوباره
+                    </Button>
+                  </div>
+                )}
+
+                {plan && !planError && (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge tone={plan.paused ? "warning" : "success"} dot>
+                        {plan.paused ? "برنامه متوقف" : "برنامه فعال"}
+                      </Badge>
+                      {plan.paused && plan.pause && (
+                        <Badge tone="neutral">تا {fa(plan.pause.days_left)} روز دیگر</Badge>
+                      )}
+                      <Badge tone="info">
+                        بار امروز {fa(plan.load.used_minutes)} از {fa(plan.load.cap_minutes)} دقیقه
+                      </Badge>
+                    </div>
+                    <ProgressBar
+                      value={plan.load.used_minutes}
+                      max={Math.max(plan.load.cap_minutes, 1)}
+                      tone={plan.load.remaining_minutes > 0 ? "primary" : "warning"}
+                      label={`${fa(plan.load.used_minutes)} از ${fa(plan.load.cap_minutes)} دقیقه مجاز امروز`}
+                      showValue
+                    />
+                    <p className="text-xs leading-6 text-ink-muted">
+                      {plan.message_fa ?? plan.load.cap_message_fa ?? plan.note_fa ?? plan.pause?.reason_fa ?? ""}
+                    </p>
+                  </div>
+                )}
+              </Card>
+
+              {xpError ? (
+                <Card className="space-y-3">
+                  <CardHeader title="امتیاز یادگیری (XP)" icon={<IconSparkles size={17} />} />
+                  <Alert variant="warning">خطا در دریافت امتیاز: {xpError}</Alert>
+                  <Button size="sm" variant="soft" onClick={loadXp}>
+                    تلاش دوباره
+                  </Button>
+                </Card>
+              ) : (
+                <StatCard
+                  label="امتیاز یادگیری (XP)"
+                  value={xp ? fa(xp.total_xp) : "…"}
+                  tone="accent"
+                  icon={<IconSparkles size={20} />}
+                  hint={xp ? `امروز ${fa(xp.today_xp)} XP · زنجیره ${fa(xp.streak)} روز فعال` : "در حال دریافت…"}
+                />
+              )}
+            </section>
 
             {/* ——— charts & quick access ——— */}
             <section className="grid gap-5 lg:grid-cols-3">

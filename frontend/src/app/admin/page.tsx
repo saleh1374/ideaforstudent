@@ -29,6 +29,7 @@ import {
   IconUsers,
 } from "@/components/ui/icons";
 import { EmploymentSection } from "./employment-section";
+import { AccessSection } from "./access-section";
 import { AdmissionsSection } from "./admissions-section";
 import { TeachersCompareSection } from "./teachers-compare-section";
 import { StudentViewSection } from "./student-view-section";
@@ -125,7 +126,8 @@ type Tab =
   | "copilot"
   | "roster"
   | "schedule"
-  | "employment";
+  | "employment"
+  | "access";
 
 /** ترتیب نمایش در منوی سمت راست */
 const TAB_KEYS: readonly string[] = [
@@ -139,6 +141,7 @@ const TAB_KEYS: readonly string[] = [
   "students",
   "admissions",
   "employment",
+  "access",
   "copilot",
 ];
 
@@ -611,6 +614,9 @@ function AdminInner() {
 
         {/* ——— استخدام معلم (ویزارد + کارتابل) ——— */}
         {tab === "employment" && <EmploymentSection canDecide={canDecide} onChanged={loadAll} />}
+
+        {/* ——— دسترسی‌ها، معاونان، سیاست استخدام و لاگ ممیزی (RBAC §5–§8, §17) ——— */}
+        {tab === "access" && schoolId !== null && <AccessSection schoolId={schoolId} role={role} />}
       </div>
   );
 }

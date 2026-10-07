@@ -27,6 +27,7 @@ import {
   IconMenu,
   IconSchool,
   IconSearch,
+  IconShield,
   IconSparkles,
   IconTasks,
   IconTrend,
@@ -45,6 +46,7 @@ export const ROLE_FA: Record<string, string> = {
   ministry: "وزارت",
   parent: "والد",
   platform_admin: "مدیر پلتفرم",
+  tutor: "معلم خصوصی",
 };
 
 type NavItem = {
@@ -85,6 +87,7 @@ const NAV: NavGroup[] = [
         defaultTab: "home",
         children: [
           { href: "/teacher?tab=class", label: "هوش کلاس", icon: IconUsers },
+          { href: "/teacher?tab=students", label: "دانش‌آموزان کلاس", icon: IconGraduation },
           { href: "/teacher?tab=assessment", label: "ارزیابی صلاحیت", icon: IconCheckCircle },
           { href: "/teacher?tab=builder", label: "سازنده آزمون", icon: IconExam },
           { href: "/teacher?tab=analysis", label: "تحلیل آزمون", icon: IconChart },
@@ -92,12 +95,30 @@ const NAV: NavGroup[] = [
           { href: "/teacher?tab=schedule", label: "برنامه من", icon: IconClock },
         ],
       },
-      { href: "/tutor", label: "بازار معلم خصوصی", icon: IconBriefcase, roles: ["student", "teacher", "parent"] },
+      { href: "/tutor", label: "بازار معلم خصوصی", icon: IconBriefcase, roles: ["student", "teacher", "parent", "tutor"] },
     ],
   },
   {
     title: "ناحیه",
-    items: [{ href: "/district", label: "پنل مدیر ناحیه", icon: IconSchool, roles: ["district_admin"] }],
+    items: [
+      {
+        href: "/district",
+        label: "پنل مدیر ناحیه",
+        icon: IconSchool,
+        roles: ["district_admin"],
+        defaultTab: "overview",
+        children: [
+          { href: "/district?tab=overview", label: "نمای کلان ناحیه", icon: IconHome },
+          { href: "/district?tab=schools", label: "مدارس ناحیه", icon: IconSchool },
+          { href: "/district?tab=staff", label: "کارکنان ناحیه", icon: IconUsers },
+          { href: "/district?tab=exams", label: "آزمون‌های رسمی", icon: IconExam },
+          { href: "/district?tab=interventions", label: "مداخله و مأموریت‌ها", icon: IconAlert },
+          { href: "/district?tab=admissions", label: "ثبت‌نام دانش‌آموزان", icon: IconGraduation },
+          { href: "/district?tab=analytics", label: "تحلیل و سلامت ناحیه", icon: IconChart },
+          { href: "/district?tab=reports", label: "گزارش‌ها و انتقالات", icon: IconTasks },
+        ],
+      },
+    ],
   },
   {
     title: "مدیریت",
@@ -119,6 +140,7 @@ const NAV: NavGroup[] = [
           { href: "/admin?tab=schedule", label: "برنامه هفتگی و شیفت", icon: IconClock },
           { href: "/admin?tab=students", label: "نمای فردی دانش‌آموز", icon: IconSearch },
           { href: "/admin?tab=employment", label: "استخدام معلم", icon: IconBriefcase },
+          { href: "/admin?tab=access", label: "دسترسی‌ها و معاونان", icon: IconShield },
           { href: "/admin?tab=copilot", label: "دستیار مدرسه", icon: IconChat },
           { href: "/assistant", label: "دستیار هوشمند", icon: IconSparkles },
           { href: "/boards", label: "بردهای تحلیلی", icon: IconLayers },
@@ -134,7 +156,7 @@ const NAV: NavGroup[] = [
       { href: "/assistant", label: "دستیار هوشمند", icon: IconSparkles, excludeRoles: ["school_admin"] },
       { href: "/boards", label: "بردهای تحلیلی", icon: IconChart, excludeRoles: ["school_admin"] },
       { href: "/parent", label: "پنل والدین", icon: IconFamily, roles: ["parent"] },
-      { href: "/billing", label: "امور مالی", icon: IconLayers, roles: ["parent", "teacher"] },
+      { href: "/billing", label: "امور مالی", icon: IconLayers, roles: ["parent", "teacher", "tutor"] },
     ],
   },
 ];

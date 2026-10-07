@@ -175,6 +175,8 @@ export function InterventionsSection() {
 
   // مودال داشبورد مأموریت
   const [missionTarget, setMissionTarget] = useState<MissionRow | null>(null);
+  const [missionDetailLoading, setMissionDetailLoading] = useState(false);
+  const [missionDetailErr, setMissionDetailErr] = useState("");
   const [ivBusy, setIvBusy] = useState(false);
 
   useEffect(() => {
@@ -308,6 +310,18 @@ export function InterventionsSection() {
 
   /* ------------------------- عملیات مأموریت ------------------------- */
 
+  /** باز کردن داشبورد مأموریت: نمای فهرست فوراً باز می‌شود و سپس جزئیات
+   *  تازه از GET /district/missions/{mission_id} جایگزین می‌شود. */
+  function openMission(row: MissionRow) {
+    setMissionTarget(row);
+    setMissionDetailErr("");
+    setMissionDetailLoading(true);
+    api<{ mission: MissionRow }>(`/district/missions/${row.id}`)
+      .then((d) => setMissionTarget(d.mission))
+      .catch((e) => setMissionDetailErr(e instanceof Error ? e.message : "خطا در دریافت جزئیات مأموریت"))
+      .finally(() => setMissionDetailLoading(false));
+  }
+
   async function createMission(e: React.FormEvent) {
     e.preventDefault();
     if (!msForm.title.trim()) {
@@ -418,7 +432,7 @@ export function InterventionsSection() {
       header: "",
       align: "end",
       render: (row) => (
-        <Button size="sm" variant="soft" onClick={() => setMissionTarget(row)}>
+        <Button size="sm" variant="soft" onClick={() => openMission(row)}>
           داشبورد پیشرفت
         </Button>
       ),
@@ -891,6 +905,12 @@ export function InterventionsSection() {
       >
         {missionTarget && (
           <div className="space-y-5">
+            {missionDetailLoading && <p className="text-[11px] text-ink-faint">در حال دریافت جزئیات تازه مأموریت…</p>}
+            {missionDetailErr && (
+              <Alert variant="warning" title="جزئیات مأموریت">
+                {missionDetailErr} — نمای فعلی از فهرست مأموریت‌هاست.
+              </Alert>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <Badge tone={MISSION_STATUS_TONE[missionTarget.status] ?? "neutral"} dot>
                 {missionTarget.status_fa}

@@ -34,6 +34,7 @@ from app.services import school_ops as ops_svc
 from app.services import school_views
 from app.services.employment import decide_request, is_principal_of, submit_teacher_request
 from app.services.rbac_service import (
+    audit_logs as rbac_audit_logs,
     check_delegation_scope,
     covering_grants,
     effective_permissions,
@@ -42,6 +43,8 @@ from app.services.rbac_service import (
     has_permission,
     has_permission_in_scope,
     log_action,
+    permission_assignments as rbac_permission_assignments,
+    permissions_catalog as rbac_permissions_catalog,
     revoke_permission,
     user_scopes,
     visible_school_ids,
@@ -609,6 +612,39 @@ async def my_permissions(current: AuthUser = Depends(get_current_user), db: Asyn
     keys = await effective_permissions(db, current.id)
     scopes = await user_scopes(db, current.id)
     return {"permissions": sorted(keys), "scopes": scopes}
+
+
+@router.get("/permissions/catalog")
+async def permissions_catalog(
+    current: AuthUser = Depends(require_permission("manage_permissions")),
+    db: AsyncSession = Depends(get_db),
+):
+    """فهرست مجوزها و نقش‌ها برای فرم واگذاری در UI (RBAC §7) — فقط‌خواندنی.
+    پیش‌تر سرویس `permissions_catalog` نوشته شده بود اما endpoint نداشت و
+    فرانت‌اند نمی‌توانست role_id / permission_id را برای POST /permissions/grant بسازد."""
+    return await rbac_permissions_catalog(db)
+
+
+@router.get("/permissions/assignments")
+async def permissions_assignments(
+    permission_key: str | None = None,
+    current: AuthUser = Depends(require_permission("manage_permissions")),
+    db: AsyncSession = Depends(get_db),
+):
+    """تخصیص‌های مجوزِ در حوزهٔ دید بیننده — برای جدول «دسترسی‌های واگذارشده»."""
+    return await rbac_permission_assignments(db, current.id, permission_key=permission_key)
+
+
+@router.get("/audit-logs")
+async def audit_logs(
+    action: str | None = None,
+    limit: int = 100,
+    current: AuthUser = Depends(require_permission("manage_permissions")),
+    db: AsyncSession = Depends(get_db),
+):
+    """خواندن لاگ ممیزی (RBAC §17–§18) — فقط دارندهٔ manage_permissions و فقط
+    رویدادهای داخل حوزهٔ دیدش؛ هر بازدید خودش رویداد ثبت می‌کند."""
+    return await rbac_audit_logs(db, current.id, action=action, limit=limit)
 
 
 @router.get("/my/schools")
